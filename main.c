@@ -183,7 +183,24 @@ static char *clip_read(size_t *out_len) {
 static int clip_write(const char *data, size_t len){ HGLOBAL h; char *p; if(!OpenClipboard(NULL)) return -1; EmptyClipboard(); h=GlobalAlloc(GMEM_MOVEABLE,len+1); if(!h){ CloseClipboard(); return -1; } p=(char*)GlobalLock(h); memcpy(p,data,len); p[len]='\0'; GlobalUnlock(h); SetClipboardData(CF_TEXT,h); CloseClipboard(); return 0; }
 #else
 /* POSIX/macOS/Wayland/X11 via CLI tools */
-static int can_run(const char *cmd){ char buf[256]; FILE *fp; int ok=0; snprintf(buf,sizeof(buf),"which %s 2>/dev/null",cmd); fp=popen(buf,"r"); if(fp){ if(fgets(buf,sizeof(buf),fp)) ok=1; pclose(fp);} return ok; }
+static int can_run(const char *cmd)
+{
+    char buf[256];
+    FILE *fp;
+    int ok = 0;
+
+    /* ask the shell where the command is; silence stderr */
+    snprintf(buf, sizeof(buf), "which %s 2>/dev/null", cmd);
+    fp = popen(buf, "r");
+    if (fp) {
+        /* fgets(dest, size, stream) — size must be the dest buffer size */
+        if (fgets(buf, (int)sizeof(buf), fp) != NULL) {
+            ok = 1;
+        }
+        pclose(fp);
+    }
+    return ok;
+}
 static int env_is(const char *k,const char *v){ const char *e=getenv(k); if(!e||!v) return 0; return strcmp(e,v)==0; }
 static int is_wayland(void){ const char *wd=getenv("WAYLAND_DISPLAY"); if(wd&&wd[0]) return 1; if(env_is("XDG_SESSION_TYPE","wayland")) return 1; return 0; }
 static char *read_via_popen(const char *cmd,size_t *out_len){ FILE *fp=popen(cmd,"r"); char *buf=NULL; size_t cap=0,n=0; int ch; *out_len=0; if(!fp) return NULL; while((ch=fgetc(fp))!=EOF){ if(n+1>cap){ size_t ncap=cap?cap*2:1024; char *tmp=(char*)realloc(buf,ncap); if(!tmp){ free(buf); pclose(fp); return NULL;} buf=tmp; cap=ncap;} buf[n++]=(char)ch;} if(buf) *out_len=n; pclose(fp); return buf; }
@@ -327,7 +344,10 @@ static void hub_broadcast(sock_t ucast, const char *adv_ip, unsigned short adv_p
 static int leaf_wait_for_hub(char *out_ip, size_t out_ipsz, unsigned short *out_port, unsigned timeout_sec){
     sock_t u; if(leaf_listen_socket(&u)!=0) return -1; {
         fd_set rf; struct timeval tv; int nf; for(;;){ FD_ZERO(&rf); FD_SET(u,&rf); tv.tv_sec=timeout_sec; tv.tv_usec=0; nf=select((int)u+1,&rf,NULL,NULL,&tv); if(nf>0 && FD_ISSET(u,&rf)){
-                char buf[512]; struct sockaddr_in from; socklen_t flen=sizeof(from); int n=recvfrom(u,buf,sizeof(buf)-1,0,(struct sockaddr*)&from,&flen); if(n>0){ char magic[16]; char ip[64]; unsigned port=0; char idhex[64]; buf[n]='\0'; if(sscanf(buf, "%15s v1 %63s %u %63s", magic, ip, &port, idhex)==4){ if(strcmp(magic,"BOARDCAST")==0){ strncpy(out_ip, ip, out_ipsz-1); out_ip[out_ipsz-1]='\0'; *out_port=(unsigned short)port; CLOSESOCK(u); return 0; } } }
+                char buf[512]; struct sockaddr_in from; socklen_t flen=sizeof(from); int n=recvfrom(u,buf,sizeof(buf)-1,0,(struct sockaddr*)&from,&flen); if(n>0){ char magic[16]; char ip[64]; unsigned port=0; char idhex[64]; buf[n]='\0'; if(sscanf(buf, "%15s v1 %63s %u %63s", magic, ip, &port, idhex)==4){ if(strcmp(magic,"BOARDCAST")==0){
+                        /* safe copy of ip into out_ip (C89) */
+                        { size_t nn = strlen(ip); if (nn >= out_ipsz) nn = out_ipsz - 1; memcpy(out_ip, ip, nn); out_ip[nn] = '\0'; }
+                        *out_port=(unsigned short)port; CLOSESOCK(u); return 0; } } }
             } else if(nf==0){ /* timeout */ CLOSESOCK(u); return -1; }
         }
     } }
@@ -362,7 +382,8 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
                     int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive) send_packet(cli[j].s, g_id, buf, blen); }
-                    if(last) free(last); last=buf; last_len=blen; last_ck=ck; buf=NULL; blen=0;
+                    if (last) { free(last); }
+                    last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
             } else if(!buf && g_verbose && !g_debug){ notify_user_clip("error accessing local clipboard"); }
             if(buf) free(buf);
@@ -385,7 +406,10 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
         } }
     }
 
-    if(last) free(last); CLOSESOCK(ls); if(ucast!=INVALID_SOCKET) CLOSESOCK(ucast); for(i=0;i<MAX_CLIENTS;++i){ if(cli[i].alive) CLOSESOCK(cli[i].s); }
+    if (last) { free(last); }
+    CLOSESOCK(ls);
+    if (ucast != INVALID_SOCKET) { CLOSESOCK(ucast); }
+    for (i = 0; i < MAX_CLIENTS; ++i) { if (cli[i].alive) { CLOSESOCK(cli[i].s); } }
     return 0; }
 
 /* ====== Client (leaf with reconnect & discovery) ====== */
@@ -398,7 +422,9 @@ static int run_client(const char *host, unsigned short port){
 reconnect_start:
     if (attempts > 0) {
         if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; }
-        if (backoff > 60000U) backoff = 60000U; msleep(backoff); if (backoff < 60000U) backoff <<= 1;
+        if (backoff > 60000U) { backoff = 60000U; }
+        msleep(backoff);
+        if (backoff < 60000U) { backoff <<= 1; }
     }
     if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("connection to boardcast hub lost"); attempts++; goto reconnect_start; }
 
@@ -412,7 +438,8 @@ reconnect_start:
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
                     if(send_packet(s, g_id, buf, blen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; }
-                    if(last) free(last); last=buf; last_len=blen; last_ck=ck; buf=NULL; blen=0;
+                    if (last) { free(last); }
+                    last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
             } else if(!buf && g_verbose && !g_debug) { notify_user_clip("error accessing local clipboard"); }
             if(buf) free(buf);
@@ -425,7 +452,11 @@ reconnect_start:
                 if(rbuf) free(rbuf);
             }
         }
-        if(last) free(last); CLOSESOCK(s); s=INVALID_SOCKET; attempts++; goto reconnect_start; }
+        if (last) { free(last); }
+        CLOSESOCK(s);
+        s = INVALID_SOCKET;
+        attempts++;
+        goto reconnect_start; }
 }
 
 static int run_client_discover(void){ char ip[64]; unsigned short port=0; fprintf(stdout,"Waiting for Boardcast hub discovery on UDP %u...\n", (unsigned)DISC_PORT); fflush(stdout); if(leaf_wait_for_hub(ip,sizeof(ip),&port,60)!=0){ fprintf(stderr,"no hub discovered\n"); return 1; } fprintf(stdout,"Discovered hub at %s:%u\n", ip, (unsigned)port); return run_client(ip, port); }
