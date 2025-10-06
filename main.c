@@ -596,10 +596,32 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
 }
 
 /* ====== Client (leaf) ====== */
-static int run_client_once(const char *host,unsigned short port,sock_t *out_sock){ sock_t s=connect_host(host,port); if(s==INVALID_SOCKET) return -1; *out_sock=s; return 0; }
+struct hub_info { char ip[64]; unsigned short port; };
+static struct hub_info *run_client_discover(void) {
+    static struct hub_info info; /* static → gültig nach Rückgabe */
+    char ip[64];
+    unsigned short port = 0;
 
-static int run_client(const char *host, unsigned short port){
-    int attempts = 0; unsigned backoff = 1000; sock_t s = INVALID_SOCKET; unsigned char oscode = detect_os_nibble();
+    fprintf(stdout, "Waiting for Boardcast hub discovery on UDP %u...\n", (unsigned)DISC_PORT);
+    fflush(stdout);
+
+    if (leaf_wait_for_hub(ip, sizeof(ip), &port, 60) != 0) {
+        fprintf(stderr, "no hub discovered\n");
+        return NULL;
+    }
+
+    fprintf(stdout, "Discovered hub at %s:%u\n", ip, (unsigned)port);
+
+    /* copy to struct and return pointer */
+    strncpy(info.ip, ip, sizeof(info.ip));
+    info.ip[sizeof(info.ip) - 1] = '\0';
+    info.port = port;
+
+    return &info;
+}
+static int run_client_once(const char *host,unsigned short port,sock_t *out_sock){ sock_t s=connect_host(host,port); if(s==INVALID_SOCKET) return -1; *out_sock=s; return 0; }
+static int run_client(const char *host, unsigned short port) {
+    int attempts = 0; unsigned backoff = 1000; const char *hubHost; unsigned short hubPort; sock_t s = INVALID_SOCKET; unsigned char oscode = detect_os_nibble();
 reconnect_start:
     if (attempts > 0) {
         if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; }
@@ -609,9 +631,26 @@ reconnect_start:
         if (backoff < 60000U) { backoff <<= 1; }
         if (g_debug && g_verbose) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub\n"); }
     }
-    if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("boardcast: connection to hub lost"); attempts++; goto reconnect_start; }
 
-    attempts = 0; backoff = 1000; fprintf(stdout,"[debug] leaf: connecting to hub at %s:%u.\n", host, (unsigned)port); fflush(stdout);
+    if (!host || !*host || port == 0) {
+        /* Fallback: no host/port given → discovery mode */
+        struct hub_info *found = run_client_discover();
+        if (!found) {
+            fprintf(stderr, "No hub discovered, aborting.\n");
+            return 1;
+        }
+        hubHost = found->ip;
+        hubPort = found->port;
+    }
+    else {
+        hubHost = host;
+        hubPort = port;
+    }
+
+
+    if (run_client_once(hubHost, hubPort, &s) != 0) { if (attempts==0) notify_user_clip("boardcast: connection to hub lost"); attempts++; goto reconnect_start; }
+
+    attempts = 0; backoff = 1000; fprintf(stdout,"[debug] leaf: connecting to hub at %s:%u.\n", hubHost, (unsigned)hubPort); fflush(stdout);
 
     /* JOIN ohne Payload, SID=0 */
     (void)send_frame(s, 1, MT_JOIN, oscode, SID_NONE, NULL, 0);
@@ -683,8 +722,6 @@ reconnect_start:
     }
 }
 
-static int run_client_discover(void){ char ip[64]; unsigned short port=0; fprintf(stdout,"Waiting for Boardcast hub discovery on UDP %u...\n", (unsigned)DISC_PORT); fflush(stdout); if(leaf_wait_for_hub(ip,sizeof(ip),&port,60)!=0){ fprintf(stderr,"no hub discovered\n"); return 1; } fprintf(stdout,"Discovered hub at %s:%u\n", ip, (unsigned)port); return run_client(ip, port); }
-
 /* ====== URI parsing & main ====== */
 enum Mode { MODE_HUB=1, MODE_LEAF=2, MODE_LEAF_DISC=3 };
 
@@ -753,5 +790,5 @@ int main(int argc, char **argv){ int i; int show_help=0; char *uri=NULL; char ip
 
     if(mode==MODE_HUB){ int rc=run_server_bind_ip(bind_ip, bind_port); cleanup_sockets(); return rc; }
     if(mode==MODE_LEAF){ int rc=run_client(ip, port); cleanup_sockets(); return rc; }
-    { int rc=run_client_discover(); cleanup_sockets(); return rc; }
+    { int rc=run_client(NULL, 0); cleanup_sockets(); return rc; }
 }
