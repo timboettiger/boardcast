@@ -598,10 +598,10 @@ reconnect_start:
     if (attempts > 0) {
         if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; }
         if (backoff > 60000U) { backoff = 60000U; }
-        if (g_debug) { fprintf(stderr, "[debug] leaf: waiting %u seconds before retry", backoff); }
+        if (g_debug) { fprintf(stderr, "[debug] leaf: waiting %u seconds before retry\n", backoff / 1000); }
         msleep(backoff);
         if (backoff < 60000U) { backoff <<= 1; }
-        if (g_debug) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub"); }
+        if (g_debug) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub\n"); }
     }
     if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("boardcast: connection to hub lost"); attempts++; goto reconnect_start; }
 
