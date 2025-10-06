@@ -1,0 +1,15 @@
+[Unit]
+Description=Boardcast Universal Clipboard Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/boardcast --cast
+Restart=on-failure
+RestartSec=2
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target
