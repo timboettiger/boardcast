@@ -30,17 +30,17 @@
 *   2-byte SID (big-endian) in the payload. After receiving HELO, the LEAF prints its SID.
 *   The HUB prints its own SID at startup.
 *
-* Wire frame (v2):
+* Wire frame (v3):
 *   byte0: 4b version (PROTO_VER), 4b flags (bit0 = system/FLAG_SYS)
 *   byte1: 4b message type (MT_*), 4b OS code (lower nibble)
 *   byte2..3: sender SID (big-endian 16-bit)
-*   byte4: payload length (0..255)
-*   byte5..: payload bytes (if any), followed by a single 0x00 pad byte
+*   byte4..6: payload length (big-endian 24-bit, 0..16777215)
+*   byte7..: payload bytes (if any), followed by a single 0x00 pad byte
 *
 * Message types (examples):
 *   - MT_JOIN  (SYS)  : LEAF → HUB, payload length = 0
 *   - MT_HELO  (SYS)  : HUB  → LEAF, payload = 2 bytes (assigned SID)
-*   - MT_PAYLOAD(DATA): clipboard content (text), length up to 255 bytes
+*   - MT_PAYLOAD(DATA): clipboard content (text), length up to 16777215 bytes
 *   - MT_OKOK  (SYS)  : optional ACK, payload = ASCII checksum of last payload
 *   - MT_UPDT/MT_IDNT/MT_QUIT etc. as implemented
 *
@@ -160,7 +160,7 @@ static void msleep(unsigned ms){
 #endif
 }
 
-/* ====== Frame v2: 1b ver/flags, 1b type/os, 2b sender_sid, 1b payload_len, payload[0..255], 0x00 pad ====== */
+/* ====== Frame v3: 1b ver/flags, 1b type/os, 2b sender_sid, 3b payload_len, payload[0..16777215], 0x00 pad ====== */
 #define PROTO_VER 1
 #define FLAG_SYS  0x01
 
@@ -187,7 +187,7 @@ static unsigned char detect_os_nibble(void) {
 /* Debug print decoded frame fields with readable type and OS */
 static void debug_print_frame(const char *who, unsigned char ver, unsigned char flags,
                               unsigned char mtype, unsigned char oscode,
-                              sid_t sender_sid, const char *payload, unsigned char plen)
+                              sid_t sender_sid, const char *payload, unsigned int plen)
 {
     const char *type_name = "????";
     const char *os_name = "?UNKNOWN?";
@@ -264,43 +264,45 @@ static int recv_all(sock_t s, unsigned char *buf, size_t len) {
 }
 
 static int send_frame(sock_t s, int is_system, unsigned char mtype, unsigned char oscode,
-                      sid_t sender_sid, const char *payload, unsigned char plen)
+                      sid_t sender_sid, const char *payload, unsigned int plen)
 {
-    unsigned char hdr[5];
+    unsigned char hdr[7];
     unsigned char pad = 0x00;
 
     /* widen and clamp */
-    unsigned int p = (unsigned int)plen;
-    if (p > 255U) p = 255U;
+    unsigned int p = plen;
+    if (p > 0xFFFFFFU) p = 0xFFFFFFU;
 
     hdr[0] = (unsigned char)(((PROTO_VER & 0x0F) << 4) | ((is_system ? FLAG_SYS : 0) & 0x0F));
     hdr[1] = (unsigned char)(((mtype & 0x0F) << 4) | (oscode & 0x0F));
     hdr[2] = (unsigned char)((sender_sid >> 8) & 0xFF);
     hdr[3] = (unsigned char)(sender_sid & 0xFF);
-    hdr[4] = (unsigned char)p;
+    hdr[4] = (unsigned char)((p >> 16) & 0xFF);
+    hdr[5] = (unsigned char)((p >> 8) & 0xFF);
+    hdr[6] = (unsigned char)(p & 0xFF);
 
-    if (send_all(s, hdr, 5) != 0) return -1;
+    if (send_all(s, hdr, 7) != 0) return -1;
     if (p > 0 && payload) {
         if (send_all(s, (const unsigned char*)payload, (size_t)p) != 0) return -1;
     }
     if (send_all(s, &pad, 1) != 0) return -1;
 
-    if (g_debug) debug_print_frame(">>", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, (unsigned char)p);
+    if (g_debug) debug_print_frame(">>", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, p);
     return 0;
 }
 
 static int recv_frame(sock_t s, unsigned char *ver, unsigned char *flags,
                     unsigned char *mtype, unsigned char *oscode,
-                    sid_t *sender_sid_out, char **payload_out, unsigned char *plen_out)
+                    sid_t *sender_sid_out, char **payload_out, unsigned int *plen_out)
 {
-    unsigned char hdr[5], pad = 0; char *pl = NULL; unsigned char plen = 0; sid_t ssid = SID_NONE;
-    if (recv_all(s, hdr, 5) != 0) return -1;
+    unsigned char hdr[7], pad = 0; char *pl = NULL; unsigned int plen = 0; sid_t ssid = SID_NONE;
+    if (recv_all(s, hdr, 7) != 0) return -1;
     *ver   = (hdr[0] >> 4) & 0x0F;
     *flags = (hdr[0] & 0x0F);
     *mtype = (hdr[1] >> 4) & 0x0F;
     *oscode= (hdr[1] & 0x0F);
     ssid   = (sid_t)(((unsigned)hdr[2] << 8) | (unsigned)hdr[3]);
-    plen   = hdr[4];
+    plen   = ((unsigned int)hdr[4] << 16) | ((unsigned int)hdr[5] << 8) | (unsigned int)hdr[6];
     if (plen > 0) { pl = (char*)malloc(plen); if (!pl) return -1; if (recv_all(s, (unsigned char*)pl, plen) != 0) { free(pl); return -1; } }
     if (recv_all(s, &pad, 1) != 0) { if (pl) free(pl); return -1; }
     if (payload_out) *payload_out = pl; else if (pl) free(pl);
@@ -516,7 +518,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
                     if (g_debug) { fprintf(stderr, "[debug] hub: clipboard changed, broadcasting %lu bytes", (unsigned long)blen); print_payload(buf, blen); }
-                    for(i=0;i<MAX_CLIENTS;++i){ if(cli[i].alive){ unsigned char plen = (unsigned char)((blen>255)?255:blen); (void)send_frame(cli[i].s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen); } }
+                    for(i=0;i<MAX_CLIENTS;++i){ if(cli[i].alive){ unsigned int plen = (blen>0xFFFFFFU)?0xFFFFFFU:(unsigned int)blen; (void)send_frame(cli[i].s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen); } }
                     if (last) free(last);
                     last = buf; last_len = blen; last_ck = ck; buf = NULL;
                 }
@@ -533,7 +535,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
 
         for(i=0;i<MAX_CLIENTS;++i){
             if(cli[i].alive && FD_ISSET(cli[i].s,&rfds)){
-                unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned char plen=0; sid_t ssid=SID_NONE;
+                unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned int plen=0; sid_t ssid=SID_NONE;
                 if (recv_frame(cli[i].s, &ver, &flags, &mtype, &osr, &ssid, &pl, &plen) != 0) { if (g_debug && cli[i].sid!=SID_NONE){ fprintf(stderr,"[debug] leaf disconnected: %04X\n", (unsigned)cli[i].sid); } CLOSESOCK(cli[i].s); cli[i].alive=0; cli[i].sid=SID_NONE; if(pl) free(pl); continue; }
 
                 if ((flags & FLAG_SYS) && mtype == MT_JOIN) {
@@ -569,8 +571,8 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                         last = pl; last_len = plen;
                         last_ck = checksum((const unsigned char*)last, last_len);
                         pl = NULL;
-                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
-                        { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, oscode, g_sid, last, (unsigned char)last_len); } }
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned int)strlen(ackbuf)); }
+                        { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, oscode, g_sid, last, (unsigned int)last_len); } }
                     }
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
@@ -662,7 +664,7 @@ reconnect_start:
     {
         struct timeval tv; fd_set rf; FD_ZERO(&rf); FD_SET(s,&rf); tv.tv_sec=5; tv.tv_usec=0;
         if (select((int)s+1, &rf, NULL, NULL, &tv) > 0 && FD_ISSET(s,&rf)) {
-            unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned char plen=0; sid_t sender=SID_NONE;
+            unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned int plen=0; sid_t sender=SID_NONE;
             if (recv_frame(s, &ver, &flags, &mtype, &osr, &sender, &pl, &plen) == 0) {
                 if ((flags & FLAG_SYS) && mtype == MT_HELO) {
                     if (pl && plen==2) { g_sid = (sid_t)(((unsigned char)pl[0]<<8) | (unsigned char)pl[1]); }
@@ -686,7 +688,7 @@ reconnect_start:
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
                     if (g_debug) { fprintf(stderr, "[debug] leaf: clipboard changed, sending %lu bytes to hub: ", (unsigned long)blen); print_payload(buf, blen); }
-                    { unsigned char plen = (unsigned char)((blen>255)?255:blen); if (send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; } }
+                    { unsigned int plen = (blen>0xFFFFFFU)?0xFFFFFFU:(unsigned int)blen; if (send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; } }
                     if (last) { free(last); } last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
             } else if(!buf && g_verbose && !g_debug) { notify_user_clip("error accessing local clipboard"); }
@@ -694,7 +696,7 @@ reconnect_start:
 
             FD_ZERO(&rfds); FD_SET(s,&rfds); tv.tv_sec=HEARTBEAT_SEC; tv.tv_usec=0; nf=select(maxfd+1,&rfds,NULL,NULL,&tv);
             if(nf>0 && FD_ISSET(s,&rfds)){
-                unsigned char ver, flags, mtype, osr; char *rbuf=NULL; unsigned char rlen=0; sid_t sender=SID_NONE;
+                unsigned char ver, flags, mtype, osr; char *rbuf=NULL; unsigned int rlen=0; sid_t sender=SID_NONE;
                 if(recv_frame(s, &ver, &flags, &mtype, &osr, &sender, &rbuf, &rlen)!=0){ if(rbuf) free(rbuf); notify_user_clip("connection to boardcast hub lost"); break; }
                 if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
                     if (rbuf && rlen>0){ if (g_debug) { fprintf(stderr, "[debug] leaf: received %u bytes from hub", (unsigned)rlen); print_payload(rbuf, rlen); }
@@ -703,14 +705,14 @@ reconnect_start:
                         last = rbuf; last_len = rlen;
                         last_ck = checksum((const unsigned char*)last, last_len);
                         rbuf = NULL;
-                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned int)strlen(ackbuf)); }
                     }
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_HELO) {
                     /* possible late/duplicate HELO without payload -> ignore */
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
-                    size_t cur_len=0; char *cur=clip_read(&cur_len); if (cur && cur_len>0) { unsigned char plen = (unsigned char)((cur_len>255)?255:cur_len); (void)send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, cur, plen); } if (cur) free(cur);
+                    size_t cur_len=0; char *cur=clip_read(&cur_len); if (cur && cur_len>0) { unsigned int plen = (cur_len>0xFFFFFFU)?0xFFFFFFU:(unsigned int)cur_len; (void)send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, cur, plen); } if (cur) free(cur);
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_IDNT) {
                     /* Re-send JOIN without payload */ (void)send_frame(s, 1, MT_JOIN, oscode, g_sid, NULL, 0);
@@ -726,7 +728,7 @@ reconnect_start:
 }
 
 /* ====== URI parsing & main ====== */
-enum Mode { MODE_HUB=1, MODE_LEAF=2, MODE_LEAF_DISC=3 };
+enum Mode { MODE_HUB=1, MODE_LEAF=2, MODE_LEAF_DISCOVERY=3 };
 
 static int has_prefix(const char *s, const char *pfx){ size_t n=strlen(pfx); return strncmp(s,pfx,n)==0; }
 static int parse_uri_role(const char *uri, enum Mode *mode, char *ip, size_t ipsz, unsigned short *port){ if(has_prefix(uri,"hub://")) { *mode=MODE_HUB; return parse_hostport(uri+6, ip, ipsz, port); } if(has_prefix(uri,"leaf://")) { *mode=MODE_LEAF; return parse_hostport(uri+7, ip, ipsz, port); } *mode=MODE_LEAF; return parse_hostport(uri, ip, ipsz, port); }
@@ -786,7 +788,7 @@ int main(int argc, char **argv){ int i; int show_help=0; char *uri=NULL; char ip
     if(show_help){ usage(argv[0]); cleanup_sockets(); return 0; }
 
     if(uri==NULL){ strcpy(bind_ip, "0.0.0.0"); bind_port = 0; mode = MODE_HUB; }
-    else if(!strcmp(uri, "leaf")) { mode = MODE_LEAF_DISC; }
+    else if(!strcmp(uri, "leaf")) { mode = MODE_LEAF_DISCOVERY; }
     else { if(parse_uri_role(uri, &mode, ip, sizeof(ip), &port)!=0){ fprintf(stderr,"bad address/URI. expected hub://IP:PORT or leaf://IP:PORT\n"); cleanup_sockets(); return 1; } if(mode==MODE_HUB){ strncpy(bind_ip, ip, sizeof(bind_ip)-1); bind_ip[sizeof(bind_ip)-1]='\0'; bind_port = port; } }
 
     if(mode==MODE_HUB){ int rc=run_server_bind_ip(bind_ip, bind_port); cleanup_sockets(); return rc; }
