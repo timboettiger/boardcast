@@ -109,9 +109,10 @@ static int g_reconnect_max = 10;/* default for -r */
 static int g_cast = 1;          /* hub broadcasts service by default (-c 0 to disable) */
 static unsigned char g_id[ID_LEN];
 
-static void logdbg1(const char *a) { if (g_debug) { fprintf(stderr, "[debug] %s\n", a); } }
-static void logdbg2(const char *fmt, const char *a) { if (g_debug) { fprintf(stderr, "[debug] "); fprintf(stderr, fmt, a); fprintf(stderr, "\n"); } }
-static void logdbg3(const char *fmt, const char *a, const char *b) { if (g_debug) { fprintf(stderr, "[debug] "); fprintf(stderr, fmt, a, b); fprintf(stderr, "\n"); } }
+#define logdbg1(a)         do { if (g_debug) { fprintf(stderr, "[debug] %s\n", (a)); } } while(0)
+#define logdbg2(fmt,a)     do { if (g_debug) { fprintf(stderr, "[debug] "); fprintf(stderr, (fmt), (a)); fprintf(stderr, "\n"); } } while(0)
+#define logdbg3(fmt,a,b)   do { if (g_debug) { fprintf(stderr, "[debug] "); fprintf(stderr, (fmt), (a), (b)); fprintf(stderr, "\n"); } } while(0)
+#define print_local_address(port) do { (void)(port); } while(0)
 
 /* ====== Utility ====== */
 static unsigned long checksum(const unsigned char *p, size_t n) { unsigned long c=5381UL; size_t i; for(i=0;i<n;++i) c=((c<<5)+c)+(unsigned long)p[i]; return c; }
@@ -223,19 +224,72 @@ static int set_broadcast(sock_t s){ int on=1; return setsockopt(s,SOL_SOCKET,SO_
 
 static int parse_hostport(const char *s,char *host,size_t hostsz,unsigned short *port){ const char *p=strchr(s,':'); if(!p) return -1; if((size_t)(p-s)>=hostsz) return -1; memcpy(host,s,(size_t)(p-s)); host[p-s]='\0'; *port=(unsigned short)atoi(p+1); return 0; }
 
-static int listen_on(const char *ip, unsigned short port, unsigned short *out_port, sock_t *out_sock){ sock_t s=socket(AF_INET,SOCK_STREAM,0); struct sockaddr_in a; if(s==INVALID_SOCKET) return -1; set_reuse(s); memset(&a,0,sizeof(a)); a.sin_family=AF_INET; a.sin_addr.s_addr = (ip && ip[0]) ? inet_addr(ip) : htonl(INADDR_ANY); if(a.sin_addr.s_addr==INADDR_NONE) a.sin_addr.s_addr=htonl(INADDR_ANY); a.sin_port=htons(port);
-    if(bind(s,(struct sockaddr*)&a,sizeof(a))==SOCKET_ERROR){ CLOSESOCK(s); return -1; }
-    if(listen(s,MAX_CLIENTS)==SOCKET_ERROR){ CLOSESOCK(s); return -1; }
-    { socklen_t alen=sizeof(a); if(getsockname(s,(struct sockaddr*)&a,&alen)==0) *out_port=ntohs(a.sin_port); else *out_port=0; }
-    *out_sock=s; return 0; }
+static int listen_on(const char *ip, unsigned short port, unsigned short *out_port, sock_t *out_sock) {
+    sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    unsigned long ina;
+
+    if (s == INVALID_SOCKET) return -1;
+    set_reuse(s);
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+
+    if (ip && ip[0]) {
+        /* inet_addr returns 0xFFFFFFFF on error (oldschool & C89-friendly) */
+        ina = inet_addr(ip);
+        if (ina == 0xFFFFFFFFUL) {
+            a.sin_addr.s_addr = htonl(INADDR_ANY);
+        } else {
+            a.sin_addr.s_addr = ina;
+        }
+    } else {
+        a.sin_addr.s_addr = htonl(INADDR_ANY);
+    }
+    a.sin_port = htons(port);
+
+    if (bind(s, (struct sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) { CLOSESOCK(s); return -1; }
+    if (listen(s, MAX_CLIENTS) == SOCKET_ERROR) { CLOSESOCK(s); return -1; }
+    {
+        socklen_t alen = sizeof(a);
+        if (getsockname(s, (struct sockaddr*)&a, &alen) == 0) *out_port = ntohs(a.sin_port);
+        else *out_port = 0;
+    }
+    *out_sock = s;
+    return 0;
+}
 
 static sock_t accept_one(sock_t ls){ struct sockaddr_in ca; socklen_t clen=sizeof(ca); return accept(ls,(struct sockaddr*)&ca,&clen); }
 
-static sock_t connect_host(const char *host,unsigned short port){ sock_t s=socket(AF_INET,SOCK_STREAM,0); struct sockaddr_in a; struct hostent *he; if(s==INVALID_SOCKET) return INVALID_SOCKET; memset(&a,0,sizeof(a)); a.sin_family=AF_INET; a.sin_port=htons(port); he=gethostbyname(host); if(!he){ CLOSESOCK(s); return INVALID_SOCKET; } memcpy(&a.sin_addr, he->h_addr, (size_t)he->h_length); if(connect(s,(struct sockaddr*)&a,sizeof(a))==SOCKET_ERROR){ CLOSESOCK(s); return INVALID_SOCKET; } return s; }
+static sock_t connect_host(const char *host, unsigned short port) {
+    sock_t s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    struct hostent *he;
+    unsigned long ina;
+
+    if (s == INVALID_SOCKET) return INVALID_SOCKET;
+
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(port);
+
+    /* Try dotted-quad first */
+    ina = inet_addr(host);
+    if (ina != 0xFFFFFFFFUL) {
+        a.sin_addr.s_addr = ina;
+    } else {
+        he = gethostbyname(host);
+        if (!he || !he->h_addr_list || !he->h_addr_list[0]) { CLOSESOCK(s); return INVALID_SOCKET; }
+        memcpy(&a.sin_addr, he->h_addr_list[0], (size_t)sizeof(struct in_addr));
+    }
+
+    if (connect(s, (struct sockaddr*)&a, sizeof(a)) == SOCKET_ERROR) {
+        CLOSESOCK(s);
+        return INVALID_SOCKET;
+    }
+    return s;
+}
 
 static int guess_local_ip(char *out, size_t outsz){ char hostname[256]; if(gethostname(hostname,sizeof(hostname))==0){ struct hostent *he=gethostbyname(hostname); if(he && he->h_addr_list && he->h_addr_list[0]){ struct in_addr in; memcpy(&in, he->h_addr_list[0], (size_t)he->h_length); strncpy(out, inet_ntoa(in), outsz-1); out[outsz-1]='\0'; return 0; } } strncpy(out, "127.0.0.1", outsz); out[outsz-1]='\0'; return -1; }
-
-static void print_local_address(unsigned short port){ char ip[64]; if(guess_local_ip(ip,sizeof(ip))==0) fprintf(stdout, "Address: %s:%u\n", ip, (unsigned)port); else fprintf(stdout, "Port: %u (could not determine IP)\n", (unsigned)port); }
 
 /* ====== Protocol I/O ======
    Frame: 4-byte big-endian length L, then ID(16) + payload(L-16) */
