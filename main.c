@@ -361,6 +361,23 @@ static int leaf_wait_for_hub(char *out_ip, size_t out_ipsz, unsigned short *out_
 /* ====== Server (hub) ====== */
 struct client { sock_t s; int alive; int has_id; unsigned char id[ID_LEN]; };
 
+/* Helper for debug: print trimmed payload */
+static void print_payload(const char *data, size_t len) {
+    size_t i, max = 48;
+    if (!g_verbose || !data || len == 0) return;
+    fprintf(stderr, "    payload: \"");
+    for (i = 0; i < len && i < max; ++i) {
+        unsigned char c = (unsigned char)data[i];
+        if (c >= 32 && c <= 126) fputc(c, stderr);
+        else if (c == '\n') fputs("\\n", stderr);
+        else if (c == '\r') fputs("\\r", stderr);
+        else if (c == '\t') fputs("\\t", stderr);
+        else fprintf(stderr, "\\x%02X", (unsigned)c);
+    }
+    if (len > max) fprintf(stderr, "...(%lu bytes)", (unsigned long)len);
+    fprintf(stderr, "\"\n");
+}
+
 static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
     sock_t ls; unsigned short port=0; struct client cli[MAX_CLIENTS]; int i; char *last=NULL; size_t last_len=0; unsigned long last_ck=0; sock_t ucast=INVALID_SOCKET; unsigned last_cast = 0; char adv_ip[64];
     for(i=0;i<MAX_CLIENTS;++i){ cli[i].s=INVALID_SOCKET; cli[i].alive=0; cli[i].has_id=0; }
@@ -387,7 +404,17 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
             char *buf=NULL; size_t blen=0; unsigned long ck; buf=clip_read(&blen);
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
-                    int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive) send_packet(cli[j].s, g_id, buf, blen); }
+                    if (g_debug) {
+                        fprintf(stderr, "[debug] hub: clipboard changed, sending to all leaves (%lu bytes)\n", (unsigned long)blen);
+                        print_payload(buf, blen);
+                    }
+                    int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive) {
+                        if (g_debug) {
+                            char hex[ID_LEN*2+1]; id_to_hex(cli[j].id, hex, sizeof(hex));
+                            fprintf(stderr, "[debug] hub: sending to leaf %s\n", cli[j].has_id ? hex : "(unknown)");
+                        }
+                        send_packet(cli[j].s, g_id, buf, blen);
+                    } }
                     if (last) { free(last); }
                     last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
@@ -406,8 +433,24 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                 if(rc!=0){ if(g_debug && cli[i].has_id){ char hex[ID_LEN*2+1]; id_to_hex(cli[i].id,hex,sizeof(hex)); fprintf(stderr,"[debug] leaf disconnected: %s\n", hex); }
                     CLOSESOCK(cli[i].s); cli[i].alive=0; cli[i].has_id=0; if(rbuf) free(rbuf); continue; }
                 if(!cli[i].has_id){ memcpy(cli[i].id, sid, ID_LEN); cli[i].has_id=1; if(g_debug){ char hex[ID_LEN*2+1]; id_to_hex(sid,hex,sizeof(hex)); fprintf(stderr,"[debug] leaf joined: %s\n", hex); } }
-                if(rbuf && rlen>0){ clip_write(rbuf,rlen); if(last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL; }
-                { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i){ send_packet(cli[j].s, sid, last, last_len); } } }
+                if(rbuf && rlen>0){
+                    if (g_debug) {
+                        char hex[ID_LEN*2+1]; id_to_hex(sid, hex, sizeof(hex));
+                        fprintf(stderr, "[debug] hub: received from leaf %s (%lu bytes)\n", hex, (unsigned long)rlen);
+                        print_payload(rbuf, rlen);
+                    }
+                    clip_write(rbuf,rlen); if(last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL;
+                }
+                { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i){
+                        if (g_debug) {
+                            char hex_from[ID_LEN*2+1], hex_to[ID_LEN*2+1];
+                            id_to_hex(sid, hex_from, sizeof(hex_from));
+                            id_to_hex(cli[j].id, hex_to, sizeof(hex_to));
+                            fprintf(stderr, "[debug] hub: forwarding from %s to %s (%lu bytes)\n", hex_from, cli[j].has_id ? hex_to : "(unknown)", (unsigned long)last_len);
+                            print_payload(last, last_len);
+                        }
+                        send_packet(cli[j].s, sid, last, last_len);
+                } } }
                 if(rbuf) free(rbuf);
         } }
     }
@@ -443,6 +486,10 @@ reconnect_start:
             buf=clip_read(&blen);
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
+                    if (g_debug) {
+                        fprintf(stderr, "[debug] leaf: clipboard changed, sending to hub (%lu bytes)\n", (unsigned long)blen);
+                        print_payload(buf, blen);
+                    }
                     if(send_packet(s, g_id, buf, blen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; }
                     if (last) { free(last); }
                     last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
@@ -454,7 +501,16 @@ reconnect_start:
             if(nf>0 && FD_ISSET(s,&rfds)){
                 unsigned char sid[ID_LEN]; char *rbuf=NULL; size_t rlen=0;
                 if(recv_packet(s,sid,&rbuf,&rlen)!=0){ if(rbuf) free(rbuf); notify_user_clip("connection to boardcast hub lost"); break; }
-                if(rbuf && rlen>0){ if(memcmp(sid,g_id,ID_LEN)!=0){ clip_write(rbuf,rlen); if(last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL; } }
+                if(rbuf && rlen>0){
+                    if(memcmp(sid,g_id,ID_LEN)!=0){
+                        if (g_debug) {
+                            char hex[ID_LEN*2+1]; id_to_hex(sid, hex, sizeof(hex));
+                            fprintf(stderr, "[debug] leaf: received from hub (origin %s, %lu bytes)\n", hex, (unsigned long)rlen);
+                            print_payload(rbuf, rlen);
+                        }
+                        clip_write(rbuf,rlen); if(last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL;
+                    }
+                }
                 if(rbuf) free(rbuf);
             }
         }
