@@ -595,7 +595,14 @@ static int run_client_once(const char *host,unsigned short port,sock_t *out_sock
 static int run_client(const char *host, unsigned short port){
     int attempts = 0; unsigned backoff = 1000; sock_t s = INVALID_SOCKET; unsigned char oscode = detect_os_nibble();
 reconnect_start:
-    if (attempts > 0) { if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; } if (backoff > 60000U) { backoff = 60000U; } msleep(backoff); if (backoff < 60000U) { backoff <<= 1; } }
+    if (attempts > 0) {
+        if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; }
+        if (backoff > 60000U) { backoff = 60000U; }
+        if (g_debug) { fprintf(stderr, "[debug] leaf: waiting %u seconds before retry", backoff); }
+        msleep(backoff);
+        if (backoff < 60000U) { backoff <<= 1; }
+        if (g_debug) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub"); }
+    }
     if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("boardcast: connection to hub lost"); attempts++; goto reconnect_start; }
 
     attempts = 0; backoff = 1000; fprintf(stdout,"[debug] leaf: connecting to hub at %s:%u.\n", host, (unsigned)port); fflush(stdout);
