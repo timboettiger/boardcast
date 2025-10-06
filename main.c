@@ -16,11 +16,11 @@
 *   boardcast -d -v -r 20 --cast                # debug+verbose, 20 reconnect attempts, enable hub broadcast
 *
 * Behavior:
-* - No URI → start as HUB (and local leaf) on hub://0.0.0.0:0 (random port on all IFs).
-* - hub://IP:PORT → start HUB bound to IP and PORT (0 = random). If --cast/-c is enabled
+* - No URI -> start as HUB (and local leaf) on hub://0.0.0.0:0 (random port on all IFs).
+* - hub://IP:PORT -> start HUB bound to IP and PORT (0 = random). If --cast/-c is enabled
 *   (default: enabled), HUB periodically broadcasts its service via UDP.
-* - leaf://IP:PORT → start LEAF and connect to the HUB with auto-reconnect.
-* - "leaf" (no IP:PORT) → LEAF enters discovery mode, waits for a HUB broadcast, and connects
+* - leaf://IP:PORT -> start LEAF and connect to the HUB with auto-reconnect.
+* - "leaf" (no IP:PORT) -> LEAF enters discovery mode, waits for a HUB broadcast, and connects
 *   to the first valid HUB it hears.
 *
 * IDs & Protocol (current):
@@ -38,8 +38,8 @@
 *   byte7..: payload bytes (if any), followed by a single 0x00 pad byte
 *
 * Message types (examples):
-*   - MT_JOIN  (SYS)  : LEAF → HUB, payload length = 0
-*   - MT_HELO  (SYS)  : HUB  → LEAF, payload = 2 bytes (assigned SID)
+*   - MT_JOIN  (SYS)  : LEAF -> HUB, payload length = 0
+*   - MT_HELO  (SYS)  : HUB  -> LEAF, payload = 2 bytes (assigned SID)
 *   - MT_PAYLOAD(DATA): clipboard content (text), length up to 16777215 bytes
 *   - MT_OKOK  (SYS)  : optional ACK, payload = ASCII checksum of last payload
 *   - MT_UPDT/MT_IDNT/MT_QUIT etc. as implemented
@@ -603,7 +603,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
 /* ====== Client (leaf) ====== */
 struct hub_info { char ip[64]; unsigned short port; };
 static struct hub_info *run_client_discover(void) {
-    static struct hub_info info; /* static → gültig nach Rückgabe */
+    static struct hub_info info; /* static -> gültig nach Rückgabe */
     char ip[64];
     unsigned short port = 0;
 
@@ -638,7 +638,7 @@ reconnect_start:
     }
 
     if (!host || !*host || port == 0) {
-        /* Fallback: no host/port given → discovery mode */
+        /* Fallback: no host/port given -> discovery mode */
         struct hub_info *found = run_client_discover();
         if (!found) {
             fprintf(stderr, "No hub discovered, aborting.\n");
@@ -734,7 +734,7 @@ static int has_prefix(const char *s, const char *pfx){ size_t n=strlen(pfx); ret
 static int parse_uri_role(const char *uri, enum Mode *mode, char *ip, size_t ipsz, unsigned short *port){ if(has_prefix(uri,"hub://")) { *mode=MODE_HUB; return parse_hostport(uri+6, ip, ipsz, port); } if(has_prefix(uri,"leaf://")) { *mode=MODE_LEAF; return parse_hostport(uri+7, ip, ipsz, port); } *mode=MODE_LEAF; return parse_hostport(uri, ip, ipsz, port); }
 
 static void usage(const char *prog) {
-    /* PLACEHOLDERS: 10 x %s  →  VERSION, YEAR, AUTHOR, LICENSE, URL, prog x5 */
+    /* PLACEHOLDERS: 10 x %s  ->  VERSION, YEAR, AUTHOR, LICENSE, URL, prog x5 */
     fprintf(stdout,
     "Boardcast - Universal Clipboard\n"
     "Version: %s\n"
