@@ -349,7 +349,7 @@ static char *clip_read(size_t *out_len){
 # ifdef PLATFORM_DARWIN
     if(can_run("pbpaste")) return read_via_popen("pbpaste",out_len);
 # endif
-    if(is_wayland() && can_run("wl-paste")) return read_via_popen("wl-paste --no-newline",out_len);
+    if(is_wayland() && can_run("wl-paste")) return read_via_popen("wl-paste --no-newline 2> /dev/null",out_len);
     if(can_run("xclip")) return read_via_popen("xclip -selection clipboard -out",out_len);
     *out_len=0; return NULL;
 }
@@ -427,6 +427,26 @@ static int leaf_wait_for_hub(char *out_ip, size_t out_ipsz, unsigned short *out_
 /* ====== Server (hub) ====== */
 struct client { sock_t s; int alive; sid_t sid; };
 
+static sid_t generate_random_sid(void)
+{
+    unsigned seed = (unsigned)time(NULL);
+#ifndef CLASSIC_MAC
+    seed ^= (unsigned)getpid();
+#endif
+#if defined(_WIN32)
+    seed ^= (unsigned)GetTickCount();
+#else
+    {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        seed ^= (unsigned)(tv.tv_usec);
+    }
+#endif
+    srand(seed);
+
+    return (sid_t)((rand() & 0xFFFF));
+}
+
 /* Return nonzero if SID is already in use by any active client */
 static int sid_in_use(struct client *cli, sid_t sid) {
     int i;
@@ -457,7 +477,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
 
     if(listen_on(bind_ip, bind_port, &port, &ls)!=0){ fprintf(stderr,"listen failed\n"); return 1; }
 
-    g_sid = (sid_t)(1 + (rand() & 0xFFFF));
+    g_sid = generate_random_sid();
 
     if(!bind_ip || !bind_ip[0] || strcmp(bind_ip,"0.0.0.0")==0)
         guess_local_ip(adv_ip,sizeof(adv_ip));
@@ -511,12 +531,9 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                     /* Assign a unique SID if this client has none yet */
                     if (cli[i].sid == SID_NONE) {
                         sid_t sid_candidate;
-                        int attempts = 0;
-
                         do {
-                            sid_candidate = (sid_t)(1 + (rand() & 0xFFFF)); /* 1..65535 */
-                            attempts++;
-                        } while (sid_in_use(cli, sid_candidate) && attempts < 1000);
+                            sid_candidate = generate_random_sid();
+                        } while (sid_candidate == SID_NONE || sid_in_use(cli, sid_candidate));
 
                         cli[i].sid = sid_candidate;
 
@@ -625,7 +642,7 @@ reconnect_start:
                 unsigned char ver, flags, mtype, osr; char *rbuf=NULL; unsigned char rlen=0; sid_t sender=SID_NONE;
                 if(recv_frame(s, &ver, &flags, &mtype, &osr, &sender, &rbuf, &rlen)!=0){ if(rbuf) free(rbuf); notify_user_clip("connection to boardcast hub lost"); break; }
                 if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
-                    if (rbuf && rlen>0){ if (g_debug) { fprintf(stderr, "[debug] leaf: payload from hub (sid=%04X, %u bytes)\n", (unsigned)sender, (unsigned)rlen); print_payload(rbuf, rlen); }
+                    if (rbuf && rlen>0){ if (g_debug) { fprintf(stderr, "[debug] leaf: received %u bytes from hub", (unsigned)rlen); print_payload(rbuf, rlen); }
                         clip_write(rbuf, rlen);
                         if (last) free(last);
                         last = rbuf; last_len = rlen;
@@ -638,16 +655,17 @@ reconnect_start:
                     /* possible late/duplicate HELO without payload -> ignore */
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
-                    size_t cur_len=0; char *cur=clip_read(&cur_len); if (cur && cur_len>0) { unsigned char plen = (unsigned char)((cur_len>255)?255:cur_len); (void)send_frame(s, 0, MT_PAYLOAD, osr, g_sid, cur, plen); } if (cur) free(cur);
+                    size_t cur_len=0; char *cur=clip_read(&cur_len); if (cur && cur_len>0) { unsigned char plen = (unsigned char)((cur_len>255)?255:cur_len); (void)send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, cur, plen); } if (cur) free(cur);
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_IDNT) {
-                    /* Re-send JOIN without payload */ (void)send_frame(s, 1, MT_JOIN, osr, g_sid, NULL, 0);
+                    /* Re-send JOIN without payload */ (void)send_frame(s, 1, MT_JOIN, oscode, g_sid, NULL, 0);
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_QUIT) { break; }
                 if(rbuf) free(rbuf);
             }
         }
         if (last) { free(last); }
+        if (g_debug) { fprintf(stderr, "[debug] leaf: no hub connection"); }
         CLOSESOCK(s); s = INVALID_SOCKET; attempts++; goto reconnect_start;
     }
 }
