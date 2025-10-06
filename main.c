@@ -118,7 +118,7 @@ typedef int sock_t;
 #endif
 
 /* ====== Config ====== */
-#define BOARDCAST_VERSION "0.2.0 (beta)"
+#define BOARDCAST_VERSION "0.2.1 (beta)"
 #define BOARDCAST_YEAR    "2025"
 #define BOARDCAST_AUTHOR  "Tim Böttiger"
 #define BOARDCAST_LICENSE "MIT License"
@@ -184,15 +184,48 @@ static unsigned char detect_os_nibble(void) {
 #endif
 }
 
+/* Debug print decoded frame fields with readable type and OS */
 static void debug_print_frame(const char *who, unsigned char ver, unsigned char flags,
-                            unsigned char mtype, unsigned char oscode,
-                            sid_t sid, const char *payload, unsigned char plen)
+                              unsigned char mtype, unsigned char oscode,
+                              sid_t sender_sid, const char *payload, unsigned char plen)
 {
+    const char *type_name = "????";
+    const char *os_name = "?UNKNOWN?";
     if (!g_debug) return;
-    fprintf(stderr, "[debug][%s] v=%u flags=0x%X %s type=%u os=%u sid=%04X plen=%u\n",
-            who, (unsigned)ver, (unsigned)flags,
-            (flags & FLAG_SYS) ? "(SYS)" : "(DATA)",
-            (unsigned)mtype, (unsigned)oscode, (unsigned)sid, (unsigned)plen);
+
+    /* Message type names */
+    switch (mtype) {
+        case MT_PAYLOAD: type_name = "DATA"; break;
+        case MT_OKOK:    type_name = "OKOK"; break;
+        case MT_JOIN:    type_name = "JOIN"; break;
+        case MT_HELO:    type_name = "HELO"; break;
+        case MT_QUIT:    type_name = "QUIT"; break;
+        case MT_UPDT:    type_name = "UPDT"; break;
+        case MT_IDNT:    type_name = "IDNT"; break;
+        case MT_RKEY:    type_name = "RKEY"; break;
+        case MT_PKEY:    type_name = "PKEY"; break;
+    }
+
+    /* OS code names (lower nibble of byte1) */
+    switch (oscode) {
+        case OS_LINUX:        os_name = "LINUXDIST"; break;
+        case OS_MAC_CLASSIC:  os_name = "MACINTOSH"; break;
+        case OS_MAC_OSX:      os_name = "MACOS_OSX"; break;
+        case OS_WINDOWS:      os_name = "MSWINDOWS"; break;
+    }
+
+    fprintf(stderr,
+        "[debug][%s] frame ver=%u flags=0x%X %s type=%s (%u) os=%s (%u) sid=0x%04X plen=%u\n",
+        who,
+        (unsigned)ver,
+        (unsigned)flags,
+        (flags & FLAG_SYS) ? "(SYS)" : "(DAT)",
+        type_name, (unsigned)mtype,
+        os_name, (unsigned)oscode,
+        (unsigned)sender_sid,
+        (unsigned)plen
+    );
+
     if (payload && plen > 0) {
         size_t i, max = 96;
         fprintf(stderr, "        payload: \"");
@@ -204,7 +237,8 @@ static void debug_print_frame(const char *who, unsigned char ver, unsigned char 
             else if (c == '\t') fputs("\\t", stderr);
             else fprintf(stderr, "\\x%02X", (unsigned)c);
         }
-        if (plen > max) fprintf(stderr, "...(%u bytes)", (unsigned)plen);
+        if (plen > max)
+            fprintf(stderr, "...(%u bytes)", (unsigned)plen);
         fprintf(stderr, "\"\n");
     }
 }
@@ -217,18 +251,28 @@ static int recv_all(sock_t s, unsigned char *buf, size_t len) {
 }
 
 static int send_frame(sock_t s, int is_system, unsigned char mtype, unsigned char oscode,
-                    sid_t sender_sid, const char *payload, unsigned char plen)
+                      sid_t sender_sid, const char *payload, unsigned char plen)
 {
-    unsigned char hdr[5]; unsigned char pad = 0x00; if (plen > 255) plen = 255;
+    unsigned char hdr[5];
+    unsigned char pad = 0x00;
+
+    /* widen and clamp */
+    unsigned int p = (unsigned int)plen;
+    if (p > 255U) p = 255U;
+
     hdr[0] = (unsigned char)(((PROTO_VER & 0x0F) << 4) | ((is_system ? FLAG_SYS : 0) & 0x0F));
     hdr[1] = (unsigned char)(((mtype & 0x0F) << 4) | (oscode & 0x0F));
     hdr[2] = (unsigned char)((sender_sid >> 8) & 0xFF);
     hdr[3] = (unsigned char)(sender_sid & 0xFF);
-    hdr[4] = plen;
+    hdr[4] = (unsigned char)p;
+
     if (send_all(s, hdr, 5) != 0) return -1;
-    if (plen > 0 && payload) { if (send_all(s, (const unsigned char*)payload, plen) != 0) return -1; }
+    if (p > 0 && payload) {
+        if (send_all(s, (const unsigned char*)payload, (size_t)p) != 0) return -1;
+    }
     if (send_all(s, &pad, 1) != 0) return -1;
-    if (g_debug) debug_print_frame("send", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, plen);
+
+    if (g_debug) debug_print_frame("send", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, (unsigned char)p);
     return 0;
 }
 
@@ -247,7 +291,8 @@ static int recv_frame(sock_t s, unsigned char *ver, unsigned char *flags,
     if (plen > 0) { pl = (char*)malloc(plen); if (!pl) return -1; if (recv_all(s, (unsigned char*)pl, plen) != 0) { free(pl); return -1; } }
     if (recv_all(s, &pad, 1) != 0) { if (pl) free(pl); return -1; }
     if (payload_out) *payload_out = pl; else if (pl) free(pl);
-    if (plen_out) *plen_out = plen; if (sender_sid_out) *sender_sid_out = ssid;
+    if (plen_out) *plen_out = plen;
+    if (sender_sid_out) *sender_sid_out = ssid;
     if (g_debug) debug_print_frame("recv", *ver, *flags, *mtype, *oscode, ssid, pl, plen);
     return 0;
 }
@@ -325,7 +370,8 @@ static int parse_hostport(const char *s,char *host,size_t hostsz,unsigned short 
 
 static int listen_on(const char *ip, unsigned short port, unsigned short *out_port, sock_t *out_sock) {
     sock_t s = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in a; unsigned long ina;
-    if (s == INVALID_SOCKET) return -1; set_reuse(s);
+    if (s == INVALID_SOCKET) return -1;
+    set_reuse(s);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     if (ip && ip[0]) { ina = inet_addr(ip); if (ina == 0xFFFFFFFFUL) { a.sin_addr.s_addr = htonl(INADDR_ANY); } else { a.sin_addr.s_addr = ina; } }
     else { a.sin_addr.s_addr = htonl(INADDR_ANY); }
@@ -381,7 +427,8 @@ static int sid_in_use(struct client *cli, sid_t sid) {
 static void print_payload(const char *data, size_t len) {
     size_t i, max = 48; if (!g_verbose || !data || len == 0) return; fprintf(stderr, "    payload: \"");
     for (i = 0; i < len && i < max; ++i) { unsigned char c = (unsigned char)data[i]; if (c >= 32 && c <= 126) fputc(c, stderr); else if (c == '\n') fputs("\\n", stderr); else if (c == '\r') fputs("\\r", stderr); else if (c == '\t') fputs("\\t", stderr); else fprintf(stderr, "\\x%02X", (unsigned)c); }
-    if (len > max) fprintf(stderr, "...(%lu bytes)", (unsigned long)len); fprintf(stderr, "\"\n");
+    if (len > max) fprintf(stderr, "...(%lu bytes)", (unsigned long)len);
+    fprintf(stderr, "\"\n");
 }
 
 static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
@@ -428,7 +475,8 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
                     if (g_debug) { fprintf(stderr, "[debug] hub: clipboard changed, broadcasting (%lu bytes)\n", (unsigned long)blen); print_payload(buf, blen); }
                     for(i=0;i<MAX_CLIENTS;++i){ if(cli[i].alive){ unsigned char plen = (unsigned char)((blen>255)?255:blen); (void)send_frame(cli[i].s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen); } }
-                    if (last) free(last); last=buf; last_len=blen; last_ck=ck; buf=NULL;
+                    if (last) free(last);
+                    last = buf; last_len = blen; last_ck = ck; buf = NULL;
                 }
             } else if(!buf && g_verbose && !g_debug){ notify_user_clip("error accessing local clipboard"); }
             if(buf) free(buf);
@@ -478,7 +526,10 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                 else if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
                     if (pl && plen > 0) {
                         clip_write(pl, plen);
-                        if (last) free(last); last=pl; last_len=plen; last_ck=checksum((const unsigned char*)last,last_len); pl=NULL;
+                        if (last) free(last);
+                        last = pl; last_len = plen;
+                        last_ck = checksum((const unsigned char*)last, last_len);
+                        pl = NULL;
                         { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, osr, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
                         { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, osr, g_sid, last, (unsigned char)last_len); } }
                     }
@@ -491,7 +542,10 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                     (void)send_frame(cli[i].s, 1, MT_HELO, osr, g_sid, NULL, 0);
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_QUIT) {
-                    if (g_debug) fprintf(stderr, "[debug] hub: QUIT received, closing client\n"); CLOSESOCK(cli[i].s); cli[i].alive=0; cli[i].sid=SID_NONE;
+                    if (g_debug) fprintf(stderr, "[debug] hub: QUIT received, closing client\n");
+                    CLOSESOCK(cli[i].s);
+                    cli[i].alive = 0;
+                    cli[i].sid = SID_NONE;
                 }
                 if (pl) free(pl);
             }
@@ -558,7 +612,10 @@ reconnect_start:
                 if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
                     if (rbuf && rlen>0){ if (g_debug) { fprintf(stderr, "[debug] leaf: payload from hub (sid=%04X, %u bytes)\n", (unsigned)sender, (unsigned)rlen); print_payload(rbuf, rlen); }
                         clip_write(rbuf, rlen);
-                        if (last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL;
+                        if (last) free(last);
+                        last = rbuf; last_len = rlen;
+                        last_ck = checksum((const unsigned char*)last, last_len);
+                        rbuf = NULL;
                         { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, osr, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
                     }
                 }
