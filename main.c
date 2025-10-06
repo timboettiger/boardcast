@@ -191,7 +191,7 @@ static void debug_print_frame(const char *who, unsigned char ver, unsigned char 
 {
     const char *type_name = "????";
     const char *os_name = "?UNKNOWN?";
-    if (!g_debug) return;
+    if (!g_debug || !g_verbose) return;
 
     /* Message type names */
     switch (mtype) {
@@ -458,7 +458,13 @@ static int sid_in_use(struct client *cli, sid_t sid) {
 }
 
 static void print_payload(const char *data, size_t len) {
-    size_t i, max = 48; if (!g_verbose || !data || len == 0) return; fprintf(stderr, ": \"");
+    size_t i, max = 48;
+    if (!g_verbose || !data || len == 0)
+    {
+        fprintf(stdout, "\n");
+        return;
+    }
+    fprintf(stderr, ": \"");
     for (i = 0; i < len && i < max; ++i) { unsigned char c = (unsigned char)data[i]; if (c >= 32 && c <= 126) fputc(c, stderr); else if (c == '\n') fputs("\\n", stderr); else if (c == '\r') fputs("\\r", stderr); else if (c == '\t') fputs("\\t", stderr); else fprintf(stderr, "?"); }
     if (len > max) fprintf(stderr, "...(%lu bytes)", (unsigned long)len);
     fprintf(stderr, "\"\n");
@@ -601,7 +607,7 @@ reconnect_start:
         if (g_debug) { fprintf(stderr, "[debug] leaf: waiting %u seconds before retry\n", backoff / 1000); }
         msleep(backoff);
         if (backoff < 60000U) { backoff <<= 1; }
-        if (g_debug) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub\n"); }
+        if (g_debug && g_verbose) { fprintf(stderr, "[debug] leaf: trying to reconnect to hub\n"); }
     }
     if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("boardcast: connection to hub lost"); attempts++; goto reconnect_start; }
 
@@ -625,7 +631,7 @@ reconnect_start:
     }
 
 
-    if (g_sid!=SID_NONE) { if (g_debug) { fprintf(stdout, "[debug] leaf: joined hub, adapt id "); print_sid_hex(g_sid); } }
+    if (g_sid!=SID_NONE) { if (g_debug) { fprintf(stdout, "[debug] leaf: joined hub, leaf-id is "); print_sid_hex(g_sid); } }
     else { fprintf(stderr, "[error] leaf: joining hub failed."); print_sid_hex(g_sid); }
 
     {
@@ -672,7 +678,7 @@ reconnect_start:
             }
         }
         if (last) { free(last); }
-        if (g_debug) { fprintf(stderr, "[debug] leaf: no hub connection"); }
+        if (g_debug && g_verbose) { fprintf(stderr, "[debug] leaf: no hub connection"); }
         CLOSESOCK(s); s = INVALID_SOCKET; attempts++; goto reconnect_start;
     }
 }
