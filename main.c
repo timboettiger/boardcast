@@ -496,7 +496,10 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
             BOARDCAST_VERSION, (unsigned)g_sid, adv_ip, (unsigned)port);
     fflush(stdout);
 
-    if(g_cast){ if(hub_cast_socket(&ucast)!=0) { if(g_debug) fprintf(stderr,"[debug] cannot open cast socket\n"); } }
+    if(g_cast){
+        if(g_debug) fprintf(stderr,"Broadcasting auto-discovery UDP beacon\n");
+        if(hub_cast_socket(&ucast)!=0) { if(g_debug) fprintf(stderr,"[debug] cannot open cast socket\n"); }
+    }
 
     { size_t blen_seed=0; char *buf_seed=clip_read(&blen_seed); if (buf_seed && blen_seed>0) { last = buf_seed; last_len = blen_seed; last_ck = checksum((const unsigned char*)last,last_len); if (g_debug) fprintf(stderr, "[debug] hub: seeded last from clipboard (%lu bytes)\n", (unsigned long)last_len); } }
 
@@ -775,7 +778,7 @@ int main(int argc, char **argv){ int i; int show_help=0; char *uri=NULL; char ip
         if(!strcmp(argv[i],"--debug") || !strcmp(argv[i],"-d")) g_debug=1;
         else if(!strcmp(argv[i],"--verbose") || !strcmp(argv[i],"-v")) g_verbose=1;
         else if(!strcmp(argv[i],"--reconnect") || !strcmp(argv[i],"-r")) { if(i+1<argc){ g_reconnect_max=atoi(argv[++i]); if(g_reconnect_max<1) g_reconnect_max=1; } }
-        else if(!strcmp(argv[i],"--cast") || !strcmp(argv[i],"-c")) { g_cast=1; }
+        else if(!strcmp(argv[i],"--cast") || !strcmp(argv[i],"-c")) g_cast=1;
         else if(!strcmp(argv[i], "--version")) { fprintf(stdout, "Boardcast %s\n", BOARDCAST_VERSION); cleanup_sockets(); return 0; }
         else if(!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) show_help=1;
         else uri=argv[i];
