@@ -1,14 +1,9 @@
 # Boardcast - Universal Clipboard
 
 **Boardcast** is a lightweight, cross-platform, universal clipboard written in ANSI C (C89).
-It shares plain-text clipboard contents between devices on a local network - with zero external services, zero dependencies, and zero encryption.
+It shares plain-text clipboard contents between devices on a local network - with zero external services, zero dependencies, and zero encryption (to keep it fast on slow systems).
 
 Why ANSI C? So it runs basically everywhere, from modern systems to legacy machines (including Classic Mac OS), making it handy for vintage Macintosh setups too.
-
-> **Version:** 0.3.1
-> **License:** MIT
-> **Author:** Tim Böttiger
-> **Homepage:** https://github.com/timboettiger/boardcast
 
 ---
 
