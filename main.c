@@ -349,7 +349,7 @@ static char *clip_read(size_t *out_len){
 # ifdef PLATFORM_DARWIN
     if(can_run("pbpaste")) return read_via_popen("pbpaste",out_len);
 # endif
-    if(is_wayland() && can_run("wl-paste")) return read_via_popen("wl-paste",out_len);
+    if(is_wayland() && can_run("wl-paste")) return read_via_popen("wl-paste --no-newline",out_len);
     if(can_run("xclip")) return read_via_popen("xclip -selection clipboard -out",out_len);
     *out_len=0; return NULL;
 }
@@ -543,16 +543,16 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                         last = pl; last_len = plen;
                         last_ck = checksum((const unsigned char*)last, last_len);
                         pl = NULL;
-                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, osr, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
-                        { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, osr, g_sid, last, (unsigned char)last_len); } }
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
+                        { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, oscode, g_sid, last, (unsigned char)last_len); } }
                     }
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
-                    int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 1, MT_UPDT, osr, g_sid, pl, plen); }
+                    int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 1, MT_UPDT, oscode, g_sid, pl, plen); }
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_IDNT) {
                     /* Re-announce hub id; empty payload per rule (sender info only) */
-                    (void)send_frame(cli[i].s, 1, MT_HELO, osr, g_sid, NULL, 0);
+                    (void)send_frame(cli[i].s, 1, MT_HELO, oscode, g_sid, NULL, 0);
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_QUIT) {
                     if (g_debug) fprintf(stderr, "[debug] hub: QUIT received, closing client\n");
@@ -601,7 +601,7 @@ reconnect_start:
     }
 
 
-    if (g_sid!=SID_NONE) { if (g_debug) { fprintf(stdout, "[debug] leaf: joined hub, got id "); print_sid_hex(g_sid); } }
+    if (g_sid!=SID_NONE) { if (g_debug) { fprintf(stdout, "[debug] leaf: joined hub, adapt id "); print_sid_hex(g_sid); } }
     else { fprintf(stderr, "[error] leaf: joining hub failed."); print_sid_hex(g_sid); }
 
     {
@@ -631,7 +631,7 @@ reconnect_start:
                         last = rbuf; last_len = rlen;
                         last_ck = checksum((const unsigned char*)last, last_len);
                         rbuf = NULL;
-                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, osr, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, oscode, g_sid, ackbuf, (unsigned char)strlen(ackbuf)); }
                     }
                 }
                 else if ((flags & FLAG_SYS) && mtype == MT_HELO) {
