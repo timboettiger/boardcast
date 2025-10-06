@@ -159,6 +159,191 @@ static void msleep(unsigned ms){
 #endif
 }
 
+/* ====== New protocol: 4b ver, 4b flags, 4b type, 4b os, 8b len, payload, 0x00 ====== */
+
+/* Version */
+#define PROTO_VER 1
+
+/* Flags (lower 4 bits); bit0 = system message */
+#define FLAG_SYS 0x01
+
+/* Message types (upper nibble of byte1) */
+enum MsgType {
+    MT_PAYLOAD = 0, /* clipboard content */
+    MT_OKOK    = 1, /* ack with payload-hash as ASCII */
+    MT_JOIN    = 2, /* leaf id (ASCII hex) */
+    MT_HELO    = 3, /* hub id (ASCII hex) */
+    MT_QUIT    = 4, /* sender id (ASCII hex) */
+    MT_UPDT    = 5, /* sender id (ASCII hex) -> ask peer to resend clipboard */
+    MT_IDNT    = 6, /* sender id (ASCII hex) -> ask peer to re-send its id */
+    MT_RKEY    = 7, /* sender id (ASCII hex) -> request public key (future) */
+    MT_PKEY    = 8  /* public key ASCII (future) */
+};
+
+/* OS codes (lower nibble of byte1) */
+#define OS_LINUX          1
+#define OS_MAC_CLASSIC    5
+#define OS_MAC_OSX        6
+#define OS_WINDOWS       10
+
+/* Map our build to OS code nibble (truncated to 4 bits when encoded) */
+static unsigned char detect_os_nibble(void) {
+#ifdef CLASSIC_MAC
+    return OS_MAC_CLASSIC & 0x0F; /* 5 -> 0x5 */
+#elif defined(_WIN32)
+    return OS_WINDOWS & 0x0F;     /* 10 -> 0xA */
+#elif defined(PLATFORM_DARWIN)
+    return OS_MAC_OSX & 0x0F;     /* 6 -> 0x6 */
+#else
+    return OS_LINUX & 0x0F;       /* 1 -> 0x1 */
+#endif
+}
+
+/* Hex helpers for IDs (ASCII <-> bytes). Our IDs are still 16 bytes, exchanged as 32 hex chars. */
+static int hexval(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    c |= 32; /* tolower */
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    return -1;
+}
+static int hex_to_bytes(const char *hex, unsigned char *out, size_t outlen) {
+    size_t i;
+    if (!hex || !out || outlen == 0) return -1;
+    for (i = 0; i < outlen; ++i) {
+        int hi = hexval(hex[i*2]);
+        int lo = hexval(hex[i*2+1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 0;
+}
+static void bytes_to_hex(const unsigned char *in, size_t inlen, char *out, size_t outsz) {
+    static const char *H = "0123456789ABCDEF";
+    size_t i;
+    if (!in || !out || outsz < (inlen*2 + 1)) return;
+    for (i = 0; i < inlen; ++i) {
+        out[i*2]   = H[(in[i] >> 4) & 0xF];
+        out[i*2+1] = H[in[i] & 0xF];
+    }
+    out[inlen*2] = '\0';
+}
+
+/* Debug print decoded frame fields */
+static void debug_print_frame(const char *who, unsigned char ver, unsigned char flags,
+                              unsigned char mtype, unsigned char oscode,
+                              const char *payload, unsigned char plen)
+{
+    if (!g_debug) return;
+    fprintf(stderr, "[debug][%s] frame ver=%u flags=0x%X %s type=%u os=%u plen=%u\n",
+            who, (unsigned)ver, (unsigned)flags,
+            (flags & FLAG_SYS) ? "(SYS)" : "(DATA)",
+            (unsigned)mtype, (unsigned)oscode, (unsigned)plen);
+    if (payload && plen > 0) {
+        size_t i, max = 96;
+        fprintf(stderr, "        payload: \"");
+        for (i = 0; i < plen && i < max; ++i) {
+            unsigned char c = (unsigned char)payload[i];
+            if (c >= 32 && c <= 126) fputc(c, stderr);
+            else if (c == '\n') fputs("\\n", stderr);
+            else if (c == '\r') fputs("\\r", stderr);
+            else if (c == '\t') fputs("\\t", stderr);
+            else fprintf(stderr, "\\x%02X", (unsigned)c);
+        }
+        if (plen > max) fprintf(stderr, "...(%u bytes)", (unsigned)plen);
+        fprintf(stderr, "\"\n");
+    }
+}
+
+/* Send all bytes helper */
+static int send_all(sock_t s, const unsigned char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        int n = send(s, (const char*)buf + sent, (int)(len - sent), 0);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/* Receive exact bytes helper */
+static int recv_all(sock_t s, unsigned char *buf, size_t len) {
+    size_t recvd = 0;
+    while (recvd < len) {
+        int n = recv(s, (char*)buf + recvd, (int)(len - recvd), 0);
+        if (n <= 0) return -1;
+        recvd += (size_t)n;
+    }
+    return 0;
+}
+
+/* Encode & send one protocol frame */
+static int send_frame(sock_t s, int is_system, unsigned char mtype, unsigned char oscode,
+                      const char *payload, unsigned char plen)
+{
+    unsigned char hdr[3];
+    unsigned char pad = 0x00;
+
+    if (plen > 255) plen = 255;
+
+    hdr[0] = (unsigned char)(((PROTO_VER & 0x0F) << 4) | ((is_system ? FLAG_SYS : 0) & 0x0F));
+    hdr[1] = (unsigned char)(((mtype & 0x0F) << 4) | (oscode & 0x0F));
+    hdr[2] = plen;
+
+    if (send_all(s, hdr, 3) != 0) return -1;
+    if (plen > 0 && payload) {
+        if (send_all(s, (const unsigned char*)payload, plen) != 0) return -1;
+    }
+    if (send_all(s, &pad, 1) != 0) return -1;
+
+    if (g_debug) debug_print_frame("send", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, payload, plen);
+    return 0;
+}
+
+/* Receive & decode one protocol frame */
+static int recv_frame(sock_t s, unsigned char *ver, unsigned char *flags,
+                      unsigned char *mtype, unsigned char *oscode,
+                      char **payload_out, unsigned char *plen_out)
+{
+    unsigned char hdr[3], pad = 0;
+    char *pl = NULL;
+    unsigned char plen = 0;
+
+    if (recv_all(s, hdr, 3) != 0) return -1;
+
+    *ver   = (hdr[0] >> 4) & 0x0F;
+    *flags = (hdr[0] & 0x0F);
+    *mtype = (hdr[1] >> 4) & 0x0F;
+    *oscode= (hdr[1] & 0x0F);
+    plen   = hdr[2];
+
+    if (plen > 0) {
+        pl = (char*)malloc(plen);
+        if (!pl) return -1;
+        if (recv_all(s, (unsigned char*)pl, plen) != 0) {
+            free(pl); return -1;
+        }
+    }
+    if (recv_all(s, &pad, 1) != 0) { if (pl) free(pl); return -1; }
+    /* Padding is always 0x00; don't hard-fail if not, but you could assert in debug */
+    if (g_debug && pad != 0x00) fprintf(stderr, "[debug] warning: padding != 0x00 (%u)\n", (unsigned)pad);
+
+    if (payload_out) *payload_out = pl; else if (pl) free(pl);
+    if (plen_out) *plen_out = plen;
+
+    if (g_debug) debug_print_frame("recv", *ver, *flags, *mtype, *oscode, pl, plen);
+    return 0;
+}
+
+/* Compose JOIN payload (leaf id as ASCII hex) */
+static void make_join_payload(char out[ID_LEN*2 + 1]) {
+    bytes_to_hex(g_id, ID_LEN, out, ID_LEN*2 + 1);
+}
+
+/* Compose HELO payload (hub id as ASCII hex) */
+static void make_helo_payload(char out[ID_LEN*2 + 1]) {
+    bytes_to_hex(g_id, ID_LEN, out, ID_LEN*2 + 1);
+}
+
 /* ====== Clipboard abstraction ====== */
 static char *clip_read(size_t *out_len);
 static int   clip_write(const char *data, size_t len);
@@ -379,192 +564,144 @@ static void print_payload(const char *data, size_t len) {
 }
 
 /* ====== Server (hub) ====== */
-static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port) {
-    sock_t ls;
-    unsigned short port = 0;
+/* ====== Server (hub) ====== */
+static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
+    sock_t ls; unsigned short port=0;
     struct client cli[MAX_CLIENTS];
     int i;
-    char *last = NULL;
-    size_t last_len = 0;
-    unsigned long last_ck = 0;
-    sock_t ucast = INVALID_SOCKET;
-    unsigned last_cast = 0;
-    char adv_ip[64];
+    char *last=NULL; size_t last_len=0; unsigned long last_ck=0;
+    sock_t ucast=INVALID_SOCKET; unsigned last_cast = 0; char adv_ip[64];
+    unsigned char oscode = detect_os_nibble();
 
-    for (i = 0; i < MAX_CLIENTS; ++i) {
-        cli[i].s = INVALID_SOCKET;
-        cli[i].alive = 0;
-        cli[i].has_id = 0;
-    }
+    for(i=0;i<MAX_CLIENTS;++i){ cli[i].s=INVALID_SOCKET; cli[i].alive=0; cli[i].has_id=0; }
 
-    if (listen_on(bind_ip, bind_port, &port, &ls) != 0) {
-        fprintf(stderr, "listen failed\n");
-        return 1;
-    }
+    if(listen_on(bind_ip, bind_port, &port, &ls)!=0){ fprintf(stderr,"listen failed\n"); return 1; }
 
-    if (!bind_ip || !bind_ip[0] || strcmp(bind_ip, "0.0.0.0") == 0)
-        guess_local_ip(adv_ip, sizeof(adv_ip));
-    else {
-        strncpy(adv_ip, bind_ip, sizeof(adv_ip) - 1);
-        adv_ip[sizeof(adv_ip) - 1] = '\0';
-    }
+    if(!bind_ip || !bind_ip[0] || strcmp(bind_ip,"0.0.0.0")==0) guess_local_ip(adv_ip,sizeof(adv_ip));
+    else { strncpy(adv_ip, bind_ip, sizeof(adv_ip)-1); adv_ip[sizeof(adv_ip)-1]='\0'; }
 
-    fprintf(stdout, "Boardcast hub started. Address: %s:%u\n", adv_ip, (unsigned)port);
-    if (g_debug) {
-        fprintf(stdout, "(debug) ");
-        print_id_hex(g_id);
-    }
+    fprintf(stdout,"Boardcast hub started. Address: %s:%u\n", adv_ip, (unsigned)port);
+    if(g_debug){ fprintf(stdout,"(debug) "); print_id_hex(g_id); }
     fflush(stdout);
 
-    if (g_cast) {
-        if (hub_cast_socket(&ucast) != 0 && g_debug)
-            fprintf(stderr, "[debug] cannot open cast socket\n");
-    }
+    if(g_cast){ if(hub_cast_socket(&ucast)!=0) { if(g_debug) fprintf(stderr,"[debug] cannot open cast socket\n"); } }
 
-    /* Initialize last clipboard state to avoid sending on startup */
+    /* Seed 'last' with current clipboard to avoid initial broadcast */
     {
-        size_t seed_len = 0;
-        char *seed_buf = clip_read(&seed_len);
-        if (seed_buf && seed_len > 0) {
-            last = seed_buf;
-            last_len = seed_len;
-            last_ck = checksum((const unsigned char *)last, last_len);
-            if (g_debug)
-                fprintf(stderr, "[debug] hub: seeded last from local clipboard (%lu bytes)\n",
-                        (unsigned long)last_len);
+        size_t blen_seed=0; char *buf_seed=clip_read(&blen_seed);
+        if (buf_seed && blen_seed>0) {
+            last = buf_seed; last_len = blen_seed; last_ck = checksum((const unsigned char*)last,last_len);
+            if (g_debug) fprintf(stderr, "[debug] hub: seeded last from clipboard (%lu bytes)\n", (unsigned long)last_len);
         }
     }
 
-    for (;;) {
-        fd_set rfds;
-        struct timeval tv;
-        int nf, maxfd = (int)ls;
-        unsigned now_sec;
+    for(;;){
+        fd_set rfds; struct timeval tv; int nf, maxfd=(int)ls; unsigned now_sec;
 
-        FD_ZERO(&rfds);
-        FD_SET(ls, &rfds);
-        for (i = 0; i < MAX_CLIENTS; ++i) {
-            if (cli[i].alive) {
-                FD_SET(cli[i].s, &rfds);
-                if ((int)cli[i].s > maxfd) maxfd = (int)cli[i].s;
-            }
-        }
+        FD_ZERO(&rfds); FD_SET(ls,&rfds);
+        for(i=0;i<MAX_CLIENTS;++i){ if(cli[i].alive){ FD_SET(cli[i].s,&rfds); if((int)cli[i].s>maxfd) maxfd=(int)cli[i].s; } }
 
-        /* Periodic UDP broadcast for discovery */
+        /* periodic discovery cast */
         now_sec = (unsigned)time(NULL);
-        if (g_cast && ucast != INVALID_SOCKET &&
-            (last_cast == 0 || now_sec - last_cast >= CAST_INTERVAL)) {
-            hub_broadcast(ucast, adv_ip, port);
-            last_cast = now_sec;
+        if (g_cast && ucast!=INVALID_SOCKET && (last_cast==0 || now_sec - last_cast >= CAST_INTERVAL)) {
+            hub_broadcast(ucast, adv_ip, port); last_cast = now_sec;
         }
 
-        /* Poll local clipboard for hub-originated changes */
+        /* Poll local clipboard: hub-originated changes -> send MT_PAYLOAD (DATA, not SYS) */
         {
-            char *buf = NULL;
-            size_t blen = 0;
-            unsigned long ck;
-            buf = clip_read(&blen);
-            if (buf && blen > 0) {
-                ck = checksum((const unsigned char *)buf, blen);
-                if (ck != last_ck || blen != last_len ||
-                    (last && memcmp(buf, last, blen) != 0)) {
-                    if (g_debug) {
-                        fprintf(stderr,
-                                "[debug] hub: clipboard changed, broadcasting (%lu bytes)\n",
-                                (unsigned long)blen);
-                        print_payload(buf, blen);
-                    }
-                    /* Send to all connected leaves */
-                    for (i = 0; i < MAX_CLIENTS; ++i) {
-                        if (cli[i].alive) {
-                            send_packet(cli[i].s, g_id, buf, blen);
+            char *buf=NULL; size_t blen=0; unsigned long ck; buf=clip_read(&blen);
+            if(buf && blen>0){
+                ck=checksum((const unsigned char*)buf,blen);
+                if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
+                    if (g_debug) { fprintf(stderr, "[debug] hub: clipboard changed, broadcasting (%lu bytes)\n", (unsigned long)blen); print_payload(buf, blen); }
+                    for(i=0;i<MAX_CLIENTS;++i){
+                        if(cli[i].alive){
+                            unsigned char plen = (unsigned char)((blen>255)?255:blen);
+                            (void)send_frame(cli[i].s, 0, MT_PAYLOAD, oscode, buf, plen);
                         }
                     }
-                    if (last) free(last);
-                    last = buf;
-                    last_len = blen;
-                    last_ck = ck;
-                    buf = NULL;
+                    if (last) free(last); last=buf; last_len=blen; last_ck=ck; buf=NULL;
                 }
-            } else if (!buf && g_verbose && !g_debug) {
-                notify_user_clip("error accessing local clipboard");
-            }
-            if (buf) free(buf);
+            } else if(!buf && g_verbose && !g_debug){ notify_user_clip("error accessing local clipboard"); }
+            if(buf) free(buf);
         }
 
-        tv.tv_sec = HEARTBEAT_SEC;
-        tv.tv_usec = 0;
-        nf = select(maxfd + 1, &rfds, NULL, NULL, &tv);
-        if (nf < 0) continue;
+        tv.tv_sec=HEARTBEAT_SEC; tv.tv_usec=0; nf=select(maxfd+1,&rfds,NULL,NULL,&tv); if(nf<0) continue;
 
-        /* Accept new connections */
-        if (FD_ISSET(ls, &rfds)) {
-            sock_t ns = accept_one(ls);
-            if (ns != INVALID_SOCKET) {
-                int slotted = 0;
-                for (i = 0; i < MAX_CLIENTS; ++i) {
-                    if (!cli[i].alive) {
-                        cli[i].s = ns;
-                        cli[i].alive = 1;
-                        cli[i].has_id = 0;
-                        slotted = 1;
-                        if (g_debug)
-                            fprintf(stderr, "[debug] leaf connected (awaiting ID)\n");
-                        break;
-                    }
-                }
-                if (!slotted) CLOSESOCK(ns);
+        /* new connections */
+        if(FD_ISSET(ls,&rfds)){
+            sock_t ns=accept_one(ls);
+            if(ns!=INVALID_SOCKET){
+                int slotted=0;
+                for(i=0;i<MAX_CLIENTS;++i){ if(!cli[i].alive){ cli[i].s=ns; cli[i].alive=1; cli[i].has_id=0; slotted=1; if(g_debug) fprintf(stderr,"[debug] leaf connected (awaiting JOIN)\n"); break; } }
+                if(!slotted) CLOSESOCK(ns);
             }
         }
 
-        /* Handle client messages */
-        for (i = 0; i < MAX_CLIENTS; ++i) {
-            if (cli[i].alive && FD_ISSET(cli[i].s, &rfds)) {
-                unsigned char sid[ID_LEN];
-                char *rbuf = NULL;
-                size_t rlen = 0;
-                int rc = recv_packet(cli[i].s, sid, &rbuf, &rlen);
-
-                if (rc != 0) {
-                    CLOSESOCK(cli[i].s);
-                    cli[i].alive = 0;
-                    cli[i].has_id = 0;
-                    if (rbuf) free(rbuf);
-                    continue;
+        /* client traffic */
+        for(i=0;i<MAX_CLIENTS;++i){
+            if(cli[i].alive && FD_ISSET(cli[i].s,&rfds)){
+                unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned char plen=0;
+                if (recv_frame(cli[i].s, &ver, &flags, &mtype, &osr, &pl, &plen) != 0) {
+                    if (g_debug && cli[i].has_id){ char hx[ID_LEN*2+1]; id_to_hex(cli[i].id,hx,sizeof(hx)); fprintf(stderr,"[debug] leaf disconnected: %s\n", hx); }
+                    CLOSESOCK(cli[i].s); cli[i].alive=0; cli[i].has_id=0; if(pl) free(pl); continue;
                 }
 
-                if (!cli[i].has_id) {
-                    memcpy(cli[i].id, sid, ID_LEN);
-                    cli[i].has_id = 1;
-                }
-
-                if (rbuf && rlen > 0) {
-                    clip_write(rbuf, rlen);  /* Write unmodified data */
-                    if (last) free(last);
-                    last = rbuf;
-                    last_len = rlen;
-                    last_ck = checksum((const unsigned char *)last, last_len);
-                    rbuf = NULL;
-
-                    /* Forward to all other leaves (not the sender) */
-                    int j;
-                    for (j = 0; j < MAX_CLIENTS; ++j) {
-                        if (cli[j].alive && j != i) {
-                            send_packet(cli[j].s, sid, last, last_len);
+                /* decode behavior */
+                if ((flags & FLAG_SYS) && mtype == MT_JOIN) {
+                    /* payload: 32 hex chars of leaf id */
+                    if (plen == ID_LEN*2 && pl) {
+                        if (hex_to_bytes(pl, cli[i].id, ID_LEN) == 0) {
+                            cli[i].has_id = 1;
+                            if (g_debug){ char hx[ID_LEN*2+1]; id_to_hex(cli[i].id,hx,sizeof(hx)); fprintf(stderr,"[debug] hub: JOIN from %s\n", hx); }
+                            /* reply HELO with hub id */
+                            { char helo[ID_LEN*2+1]; make_helo_payload(helo); (void)send_frame(cli[i].s, 1, MT_HELO, oscode, helo, (unsigned char)strlen(helo)); }
                         }
                     }
                 }
-                if (rbuf) free(rbuf);
+                else if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
+                    /* clipboard content from leaf -> write locally, forward to others, ack back */
+                    if (pl && plen > 0) {
+                        clip_write(pl, plen);
+                        if (last) free(last); last=pl; last_len=plen; last_ck=checksum((const unsigned char*)last,last_len); pl=NULL;
+                        /* ack to sender */
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(cli[i].s, 1, MT_OKOK, oscode, ackbuf, (unsigned char)strlen(ackbuf)); }
+                        /* forward to all other leaves (not the sender) */
+                        { int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 0, MT_PAYLOAD, osr, last, (unsigned char)last_len); } }
+                    }
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
+                    /* ask others to re-send clipboard (we just forward) */
+                    int j; for(j=0;j<MAX_CLIENTS;++j){ if(cli[j].alive && j!=i) (void)send_frame(cli[j].s, 1, MT_UPDT, osr, pl, plen); }
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_IDNT) {
+                    /* re-send our id (HELO) */
+                    char helo[ID_LEN*2+1]; make_helo_payload(helo); (void)send_frame(cli[i].s, 1, MT_HELO, oscode, helo, (unsigned char)strlen(helo));
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_QUIT) {
+                    /* coordinated disconnect */
+                    if (g_debug) fprintf(stderr, "[debug] hub: QUIT received, closing client\n");
+                    CLOSESOCK(cli[i].s); cli[i].alive=0; cli[i].has_id=0;
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_RKEY) {
+                    /* future crypto: reply with placeholder public key */
+                    const char *pk = "PK:N/A";
+                    (void)send_frame(cli[i].s, 1, MT_PKEY, oscode, pk, (unsigned char)strlen(pk));
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_PKEY) {
+                    /* log and ignore for now */
+                    /* nothing */
+                }
+
+                if (pl) free(pl);
             }
         }
     }
 
-    if (last) free(last);
+    if (last) { free(last); }
     CLOSESOCK(ls);
-    if (ucast != INVALID_SOCKET) CLOSESOCK(ucast);
-    for (i = 0; i < MAX_CLIENTS; ++i)
-        if (cli[i].alive) CLOSESOCK(cli[i].s);
-
+    if (ucast != INVALID_SOCKET) { CLOSESOCK(ucast); }
+    for (i = 0; i < MAX_CLIENTS; ++i) { if (cli[i].alive) { CLOSESOCK(cli[i].s); } }
     return 0;
 }
 
@@ -572,126 +709,125 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port) {
 static int run_client_once(const char *host,unsigned short port,sock_t *out_sock){ sock_t s=connect_host(host,port); if(s==INVALID_SOCKET) return -1; *out_sock=s; return 0; }
 
 /* ====== Client (leaf) ====== */
-static int run_client(const char *host, unsigned short port) {
-    int attempts = 0;
-    unsigned backoff = 1000; /* milliseconds, doubles up to 60s */
+static int run_client(const char *host, unsigned short port){
+    int attempts = 0; unsigned backoff = 1000; /* ms, grows to 60000 */
     sock_t s = INVALID_SOCKET;
+    unsigned char oscode = detect_os_nibble();
 
 reconnect_start:
     if (attempts > 0) {
-        if (attempts >= g_reconnect_max) {
-            notify_user_clip("boardcast: reconnect attempts exhausted");
-            fprintf(stderr, "reconnect attempts exhausted\n");
-            return 1;
-        }
-        if (backoff > 60000U) backoff = 60000U;
+        if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; }
+        if (backoff > 60000U) { backoff = 60000U; }
         msleep(backoff);
-        if (backoff < 60000U) backoff <<= 1;
+        if (backoff < 60000U) { backoff <<= 1; }
     }
-
-    if (run_client_once(host, port, &s) != 0) {
-        if (attempts == 0) notify_user_clip("connection to boardcast hub lost");
-        attempts++;
-        goto reconnect_start;
-    }
+    if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("connection to boardcast hub lost"); attempts++; goto reconnect_start; }
 
     /* Connected */
-    attempts = 0;
-    backoff = 1000;
-    fprintf(stdout, "Connected to %s:%u (LEAF).\n", host, (unsigned)port);
-    if (g_debug) {
-        fprintf(stdout, "(debug) ");
-        print_id_hex(g_id);
+    attempts = 0; backoff = 1000; /* reset */
+    fprintf(stdout,"Connected to %s:%u (LEAF).\n", host, (unsigned)port); if(g_debug){ fprintf(stdout,"(debug) "); print_id_hex(g_id); } fflush(stdout);
+
+    /* Send JOIN (system) with our ID (ASCII hex) */
+    {
+        char joinbuf[ID_LEN*2+1]; make_join_payload(joinbuf);
+        (void)send_frame(s, 1, MT_JOIN, oscode, joinbuf, (unsigned char)strlen(joinbuf));
     }
-    fflush(stdout);
+
+    /* Expect optional HELO (system) back; do not block forever */
+    {
+        struct timeval tv; fd_set rf; FD_ZERO(&rf); FD_SET(s,&rf); tv.tv_sec=2; tv.tv_usec=0;
+        if (select((int)s+1, &rf, NULL, NULL, &tv) > 0 && FD_ISSET(s,&rf)) {
+            unsigned char ver, flags, mtype, osr; char *pl=NULL; unsigned char plen=0;
+            if (recv_frame(s, &ver, &flags, &mtype, &osr, &pl, &plen) == 0) {
+                if ((flags & FLAG_SYS) && mtype == MT_HELO && pl && plen == ID_LEN*2) {
+                    if (g_debug) fprintf(stderr, "[debug] leaf: HELO received from hub\n");
+                    /* we could store hub id if desired */
+                }
+                if (pl) free(pl);
+            }
+        }
+    }
 
     {
-        char *last = NULL;
-        size_t last_len = 0;
-        unsigned long last_ck = 0;
+        char *last=NULL; size_t last_len=0; unsigned long last_ck=0;
 
-        /* Initialize last clipboard state to avoid initial send */
+        /* Seed 'last' to avoid initial send */
         {
-            size_t seed_len = 0;
-            char *seed_buf = clip_read(&seed_len);
-            if (seed_buf && seed_len > 0) {
-                last = seed_buf;
-                last_len = seed_len;
-                last_ck = checksum((const unsigned char *)last, last_len);
-                if (g_debug)
-                    fprintf(stderr, "[debug] leaf: seeded last from local clipboard (%lu bytes)\n",
-                            (unsigned long)last_len);
+            size_t blen_seed=0; char *buf_seed=clip_read(&blen_seed);
+            if (buf_seed && blen_seed>0) {
+                last = buf_seed; last_len=blen_seed; last_ck=checksum((const unsigned char*)last,last_len);
+                if (g_debug) fprintf(stderr, "[debug] leaf: seeded last from clipboard (%lu bytes)\n", (unsigned long)last_len);
             }
         }
 
-        for (;;) {
-            fd_set rfds;
-            struct timeval tv;
-            int nf, maxfd = (int)s;
-            char *buf = NULL;
-            size_t blen = 0;
-            unsigned long ck;
+        for(;;){
+            fd_set rfds; struct timeval tv; int nf, maxfd=(int)s; char *buf=NULL; size_t blen=0; unsigned long ck;
 
-            /* Poll local clipboard */
-            buf = clip_read(&blen);
-            if (buf && blen > 0) {
-                ck = checksum((const unsigned char *)buf, blen);
-                if (ck != last_ck || blen != last_len ||
-                    (last && memcmp(buf, last, blen) != 0)) {
-                    if (g_debug)
-                        fprintf(stderr, "[debug] leaf: clipboard changed, sending to hub (%lu bytes)\n",
-                                (unsigned long)blen);
-                    if (send_packet(s, g_id, buf, blen) != 0) {
-                        if (buf) free(buf);
-                        notify_user_clip("connection to boardcast hub lost");
-                        break;
-                    }
-                    if (last) free(last);
-                    last = buf;
-                    last_len = blen;
-                    last_ck = ck;
-                    buf = NULL;
+            /* local clipboard polling -> send MT_PAYLOAD (DATA, not SYS) */
+            buf=clip_read(&blen);
+            if(buf && blen>0){
+                ck=checksum((const unsigned char*)buf,blen);
+                if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
+                    if (g_debug) { fprintf(stderr, "[debug] leaf: clipboard changed, sending to hub (%lu bytes)\n", (unsigned long)blen); print_payload(buf, blen); }
+                    { unsigned char plen = (unsigned char)((blen>255)?255:blen);
+                      if (send_frame(s, 0, MT_PAYLOAD, oscode, buf, plen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; } }
+                    if (last) { free(last); } last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
-            } else if (!buf && g_verbose && !g_debug) {
-                notify_user_clip("error accessing local clipboard");
-            }
-            if (buf) free(buf);
+            } else if(!buf && g_verbose && !g_debug) { notify_user_clip("error accessing local clipboard"); }
+            if(buf) free(buf);
 
-            FD_ZERO(&rfds);
-            FD_SET(s, &rfds);
-            tv.tv_sec = HEARTBEAT_SEC;
-            tv.tv_usec = 0;
-            nf = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+            FD_ZERO(&rfds); FD_SET(s,&rfds);
+            tv.tv_sec=HEARTBEAT_SEC; tv.tv_usec=0; nf=select(maxfd+1,&rfds,NULL,NULL,&tv);
 
-            if (nf > 0 && FD_ISSET(s, &rfds)) {
-                unsigned char sid[ID_LEN];
-                char *rbuf = NULL;
-                size_t rlen = 0;
+            if(nf>0 && FD_ISSET(s,&rfds)){
+                unsigned char ver, flags, mtype, osr; char *rbuf=NULL; unsigned char rlen=0;
+                if(recv_frame(s, &ver, &flags, &mtype, &osr, &rbuf, &rlen)!=0){ if(rbuf) free(rbuf); notify_user_clip("connection to boardcast hub lost"); break; }
 
-                if (recv_packet(s, sid, &rbuf, &rlen) != 0) {
-                    if (rbuf) free(rbuf);
-                    notify_user_clip("connection to boardcast hub lost");
+                if ((flags & FLAG_SYS) && mtype == MT_HELO) {
+                    /* Optional HELO (late) from hub */
+                    /* nothing required */
+                }
+                else if (!(flags & FLAG_SYS) && mtype == MT_PAYLOAD) {
+                    if (rbuf && rlen>0){
+                        if (g_debug) { fprintf(stderr, "[debug] leaf: received payload from hub (%u bytes)\n", (unsigned)rlen); print_payload(rbuf, rlen); }
+                        clip_write(rbuf, rlen);
+                        if (last) free(last); last=rbuf; last_len=rlen; last_ck=checksum((const unsigned char*)last,last_len); rbuf=NULL;
+                        /* send ack OKOK with checksum */
+                        { char ackbuf[32]; sprintf(ackbuf, "%08lX", (unsigned long)last_ck); (void)send_frame(s, 1, MT_OKOK, oscode, ackbuf, (unsigned char)strlen(ackbuf)); }
+                    }
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_OKOK) {
+                    /* ACK from hub; can be logged */
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_UPDT) {
+                    /* hub asks to resend our clipboard */
+                    size_t cur_len=0; char *cur=clip_read(&cur_len);
+                    if (cur && cur_len>0) {
+                        unsigned char plen = (unsigned char)((cur_len>255)?255:cur_len);
+                        (void)send_frame(s, 0, MT_PAYLOAD, oscode, cur, plen);
+                    }
+                    if (cur) free(cur);
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_IDNT) {
+                    /* hub asks to resend our id -> send JOIN again */
+                    char joinbuf[ID_LEN*2+1]; make_join_payload(joinbuf);
+                    (void)send_frame(s, 1, MT_JOIN, oscode, joinbuf, (unsigned char)strlen(joinbuf));
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_RKEY) {
+                    /* reply with placeholder pkey */
+                    const char *pk = "PK:N/A";
+                    (void)send_frame(s, 1, MT_PKEY, oscode, pk, (unsigned char)strlen(pk));
+                }
+                else if ((flags & FLAG_SYS) && mtype == MT_QUIT) {
+                    /* hub signals shutdown */
                     break;
                 }
-                if (rbuf && rlen > 0) {
-                    /* Ignore frames that originate from this leaf */
-                    if (memcmp(sid, g_id, ID_LEN) != 0) {
-                        if (g_debug)
-                            fprintf(stderr, "[debug] leaf: received data from hub (%lu bytes)\n",
-                                    (unsigned long)rlen);
-                        clip_write(rbuf, rlen);  /* Write unmodified data */
-                        if (last) free(last);
-                        last = rbuf;
-                        last_len = rlen;
-                        last_ck = checksum((const unsigned char *)last, last_len);
-                        rbuf = NULL;
-                    }
-                }
-                if (rbuf) free(rbuf);
+
+                if(rbuf) free(rbuf);
             }
         }
 
-        if (last) free(last);
+        if (last) { free(last); }
         CLOSESOCK(s);
         s = INVALID_SOCKET;
         attempts++;
