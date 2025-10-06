@@ -215,7 +215,7 @@ static void debug_print_frame(const char *who, unsigned char ver, unsigned char 
     }
 
     fprintf(stderr,
-        "[debug][%s] frame ver=%u flags=0x%X %s type=%s (%u) os=%s (%u) sid=0x%04X plen=%u\n",
+        "[debug] %s frame ver=%u flags=0x%X %s type=%s (%u) os=%s (%u) sid=0x%04X %u bytes: ",
         who,
         (unsigned)ver,
         (unsigned)flags,
@@ -228,7 +228,7 @@ static void debug_print_frame(const char *who, unsigned char ver, unsigned char 
 
     if (payload && plen > 0) {
         size_t i, max = 96;
-        fprintf(stderr, "        payload: \"");
+        fprintf(stderr, "\"");
         for (i = 0; i < plen && i < max; ++i) {
             unsigned char c = (unsigned char)payload[i];
             if (c >= 32 && c <= 126) fputc(c, stderr);
@@ -239,8 +239,9 @@ static void debug_print_frame(const char *who, unsigned char ver, unsigned char 
         }
         if (plen > max)
             fprintf(stderr, "...(%u bytes)", (unsigned)plen);
-        fprintf(stderr, "\"\n");
+        fprintf(stderr, "\"");
     }
+    fprintf(stderr, "\n");
 }
 
 static int send_all(sock_t s, const unsigned char *buf, size_t len) {
@@ -272,7 +273,7 @@ static int send_frame(sock_t s, int is_system, unsigned char mtype, unsigned cha
     }
     if (send_all(s, &pad, 1) != 0) return -1;
 
-    if (g_debug) debug_print_frame("send", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, (unsigned char)p);
+    if (g_debug) debug_print_frame(">>", PROTO_VER, (is_system?FLAG_SYS:0), mtype, oscode, sender_sid, payload, (unsigned char)p);
     return 0;
 }
 
@@ -293,7 +294,7 @@ static int recv_frame(sock_t s, unsigned char *ver, unsigned char *flags,
     if (payload_out) *payload_out = pl; else if (pl) free(pl);
     if (plen_out) *plen_out = plen;
     if (sender_sid_out) *sender_sid_out = ssid;
-    if (g_debug) debug_print_frame("recv", *ver, *flags, *mtype, *oscode, ssid, pl, plen);
+    if (g_debug) debug_print_frame("<<", *ver, *flags, *mtype, *oscode, ssid, pl, plen);
     return 0;
 }
 
@@ -426,7 +427,7 @@ static int sid_in_use(struct client *cli, sid_t sid) {
 
 static void print_payload(const char *data, size_t len) {
     size_t i, max = 48; if (!g_verbose || !data || len == 0) return; fprintf(stderr, "    payload: \"");
-    for (i = 0; i < len && i < max; ++i) { unsigned char c = (unsigned char)data[i]; if (c >= 32 && c <= 126) fputc(c, stderr); else if (c == '\n') fputs("\\n", stderr); else if (c == '\r') fputs("\\r", stderr); else if (c == '\t') fputs("\\t", stderr); else fprintf(stderr, "\\x%02X", (unsigned)c); }
+    for (i = 0; i < len && i < max; ++i) { unsigned char c = (unsigned char)data[i]; if (c >= 32 && c <= 126) fputc(c, stderr); else if (c == '\n') fputs("\\n", stderr); else if (c == '\r') fputs("\\r", stderr); else if (c == '\t') fputs("\\t", stderr); else fprintf(stderr, "?"); }
     if (len > max) fprintf(stderr, "...(%lu bytes)", (unsigned long)len);
     fprintf(stderr, "\"\n");
 }
@@ -486,7 +487,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
 
         if(FD_ISSET(ls,&rfds)){
             sock_t ns=accept_one(ls);
-            if(ns!=INVALID_SOCKET){ int slotted=0; for(i=0;i<MAX_CLIENTS;++i){ if(!cli[i].alive){ cli[i].s=ns; cli[i].alive=1; cli[i].sid=SID_NONE; slotted=1; if(g_debug) fprintf(stderr,"[debug] leaf connected (awaiting JOIN)\n"); break; } } if(!slotted) CLOSESOCK(ns); }
+            if(ns!=INVALID_SOCKET){ int slotted=0; for(i=0;i<MAX_CLIENTS;++i){ if(!cli[i].alive){ cli[i].s=ns; cli[i].alive=1; cli[i].sid=SID_NONE; slotted=1; if(g_debug) fprintf(stderr,"[debug] unknown leaf connected (awaiting JOIN)\n"); break; } } if(!slotted) CLOSESOCK(ns); }
         }
 
         for(i=0;i<MAX_CLIENTS;++i){
@@ -508,7 +509,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                         cli[i].sid = sid_candidate;
 
                         if (g_debug) {
-                            fprintf(stderr, "[debug] hub: assigned SID %04X to new leaf\n",
+                            fprintf(stderr, "[debug] hub: assigning id %04X to new leaf\n",
                                     (unsigned)cli[i].sid);
                         }
 
@@ -568,7 +569,7 @@ reconnect_start:
     if (attempts > 0) { if (attempts >= g_reconnect_max) { notify_user_clip("boardcast: reconnect attempts exhausted"); fprintf(stderr, "reconnect attempts exhausted\n"); return 1; } if (backoff > 60000U) { backoff = 60000U; } msleep(backoff); if (backoff < 60000U) { backoff <<= 1; } }
     if (run_client_once(host, port, &s) != 0) { if (attempts==0) notify_user_clip("connection to boardcast hub lost"); attempts++; goto reconnect_start; }
 
-    attempts = 0; backoff = 1000; fprintf(stdout,"Connected to %s:%u (LEAF).\n", host, (unsigned)port); fflush(stdout);
+    attempts = 0; backoff = 1000; fprintf(stdout,"[leaf] Connected to %s:%u.\n", host, (unsigned)port); fflush(stdout);
 
     /* JOIN ohne Payload, SID=0 */
     (void)send_frame(s, 1, MT_JOIN, oscode, SID_NONE, NULL, 0);
@@ -587,7 +588,9 @@ reconnect_start:
         }
     }
 
-    if (g_sid!=SID_NONE) { fprintf(stdout, "(leaf) "); print_sid_hex(g_sid); }
+
+    if (g_sid!=SID_NONE) { if (g_debug) { fprintf(stdout, "[debug] leaf: registration successful, i am "); print_sid_hex(g_sid); } }
+    else { fprintf(stderr, "[error] leaf: registration failed."); print_sid_hex(g_sid); }
 
     {
         char *last=NULL; size_t last_len=0; unsigned long last_ck=0;
@@ -598,7 +601,7 @@ reconnect_start:
             buf=clip_read(&blen);
             if(buf && blen>0){ ck=checksum((const unsigned char*)buf,blen);
                 if(ck!=last_ck || blen!=last_len || (last && memcmp(buf,last,blen)!=0)){
-                    if (g_debug) { fprintf(stderr, "[debug] leaf: clipboard changed, sending to hub (%lu bytes)\n", (unsigned long)blen); print_payload(buf, blen); }
+                    if (g_debug) { fprintf(stderr, "[debug] leaf: clipboard changed, sending %lu bytes to hub: ", (unsigned long)blen); print_payload(buf, blen); }
                     { unsigned char plen = (unsigned char)((blen>255)?255:blen); if (send_frame(s, 0, MT_PAYLOAD, oscode, g_sid, buf, plen)!=0){ if(buf) free(buf); notify_user_clip("connection to boardcast hub lost"); break; } }
                     if (last) { free(last); } last = buf; last_len = blen; last_ck = ck; buf = NULL; blen = 0;
                 }
