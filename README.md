@@ -469,7 +469,7 @@ t=0s   t=1s   t=2s   t=4s   t=8s   ...   (cap ~60s)
 
 - **Plain text only** (no rich text or images)
 - **No encryption or authentication** → use only on trusted local networks
-- **Per-message payload limit: 255 bytes** (current v1 frame format)
+- **Per-message payload limit: 16.777.215 bytes** (current v1 frame format)
   > Longer clipboard texts will be truncated by the current implementation.
 
 ---
