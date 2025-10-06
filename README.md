@@ -156,8 +156,8 @@ All messages are sent over TCP and have this frame layout:
 | 0       | `ver/flags`      | High nibble: protocol version (`PROTO_VER`). Low nibble: flags (`bit0=SYS`).|
 | 0       | `type/os`        | High nibble: message type (`MT_*`). Low nibble: OS code (see below).        |
 | 1..2    | `sender_ID`      | 16-bit big-endian sender ID.                                                |
-| 3       | `payload_len`    | 0..255 (bytes).                                                             |
-| 4..N    | `payload`        | Up to 255 bytes, followed by a single `0x00` pad byte.                      |
+| 3..5    | `payload_len`    | 24-bit big-endian payload length (0...16777215 bytes)                       |
+| 6..N    | `payload`        | Up to 255 bytes, followed by a single `0x00` pad byte.                      |
 
 **Flags**
 - `FLAG_SYS` (bit 0 of low nibble in byte 0): system/control message
