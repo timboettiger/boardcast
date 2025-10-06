@@ -89,6 +89,12 @@
 #endif
 
 /* ====== Config ====== */
+#define BOARDCAST_VERSION "0.1.0 (beta)"
+#define BOARDCAST_YEAR    "2025"
+#define BOARDCAST_AUTHOR  "Tim Böttiger"
+#define BOARDCAST_LICENSE "MIT License"
+#define BOARDCAST_URL     "https://github.com/timboettiger/boardcast"
+
 #define MAX_BUF         65536
 #define HEARTBEAT_SEC   2
 #define MAX_CLIENTS     32
@@ -473,18 +479,46 @@ static int parse_uri_role(const char *uri, enum Mode *mode, char *ip, size_t ips
     *mode=MODE_LEAF; return parse_hostport(uri, ip, ipsz, port);
 }
 
-static void usage(const char *prog){
+static void usage(const char *prog) {
     fprintf(stdout,
         "Boardcast — Universal Clipboard (no encryption)\n"
-        "Usage: %s [--debug/-d] [--verbose/-v] [--reconnect/-r N] [--cast/-c 0|1]\n"
-        "             [ hub://IP:PORT | leaf://IP:PORT | leaf | --help/-h ]\n"
+        "Version: %s\n"
+        "Copyright (c) %s %s\n"
+        "License: %s\n"
+        "Homepage: %s\n"
+        "\n"
+        "Usage:\n"
+        "  %s [OPTIONS] [URI]\n"
+        "\n"
+        "Description:\n"
+        "  Boardcast is a lightweight universal clipboard that synchronizes plain text\n"
+        "  between multiple devices on a local network. It uses a simple hub/leaf\n"
+        "  architecture without encryption or third-party dependencies.\n"
+        "\n"
+        "Options:\n"
+        "  -d, --debug               Enable debug output (stderr)\n"
+        "  -v, --verbose             Post user messages via clipboard instead of console\n"
+        "  -r, --reconnect <N>       Number of reconnect attempts (default: 10)\n"
+        "  -c, --cast <0|1>          Enable or disable UDP hub broadcast (default: 1)\n"
+        "  -h, --help                Show this help text and exit\n"
+        "\n"
         "Examples:\n"
-        "   %s\n"
-        "   %s hub://0.0.0.0:33654\n"
-        "   %s leaf://192.168.1.1:33654\n"
-        "   %s leaf\n"
-        "   %s -d -v -r 20 --cast 1\n\n",
-        prog, prog, prog, prog, prog, prog);
+        "  %s                          Start a hub on all interfaces (random port)\n"
+        "  %s hub://0.0.0.0:33654      Start hub on port 33654\n"
+        "  %s leaf://192.168.1.1:33654 Join an existing hub\n"
+        "  %s leaf                     Wait for hub broadcast and auto-connect\n"
+        "  %s -d -v -r 20 --cast 1     Debug + verbose mode, with discovery enabled\n"
+        "\n"
+        "Report bugs at:\n"
+        "  %s/issues\n"
+        "\n",
+        BOARDCAST_VERSION,
+        BOARDCAST_YEAR,
+        BOARDCAST_AUTHOR,
+        BOARDCAST_LICENSE,
+        BOARDCAST_URL,
+        prog, prog, prog, prog, prog, prog,
+        BOARDCAST_URL);
 }
 
 int main(int argc, char **argv){ int i; int show_help=0; char *uri=NULL; char ip[256]; unsigned short port=0; enum Mode mode=MODE_HUB; char bind_ip[256]; unsigned short bind_port=0;
@@ -497,6 +531,11 @@ int main(int argc, char **argv){ int i; int show_help=0; char *uri=NULL; char ip
         else if(!strcmp(argv[i],"--reconnect") || !strcmp(argv[i],"-r")) { if(i+1<argc){ g_reconnect_max=atoi(argv[++i]); if(g_reconnect_max<1) g_reconnect_max=1; } }
         else if(!strcmp(argv[i],"--cast") || !strcmp(argv[i],"-c")) { if(i+1<argc){ g_cast=atoi(argv[++i])?1:0; } }
         else if(!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) show_help=1;
+        else if(!strcmp(argv[i], "--version")) {
+            fprintf(stdout, "Boardcast %s\n", BOARDCAST_VERSION);
+            cleanup_sockets();
+            return 0;
+        }
         else uri=argv[i];
     }
     if(show_help){ usage(argv[0]); cleanup_sockets(); return 0; }
