@@ -450,7 +450,7 @@ static sid_t generate_random_sid(void)
 /* Return nonzero if SID is already in use by any active client */
 static int sid_in_use(struct client *cli, sid_t sid) {
     int i;
-    if (sid == SID_NONE) return 1; /* reserve 0 */
+    if (sid == SID_NONE || sid == g_sid) return 1; /* reserve 0 */
     for (i = 0; i < MAX_CLIENTS; ++i) {
         if (cli[i].alive && cli[i].sid == sid) return 1;
     }
@@ -533,7 +533,7 @@ static int run_server_bind_ip(const char *bind_ip, unsigned short bind_port){
                         sid_t sid_candidate;
                         do {
                             sid_candidate = generate_random_sid();
-                        } while (sid_candidate == SID_NONE || sid_in_use(cli, sid_candidate));
+                        } while (sid_in_use(cli, sid_candidate));
 
                         cli[i].sid = sid_candidate;
 
