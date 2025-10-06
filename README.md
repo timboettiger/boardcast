@@ -20,8 +20,8 @@ Boardcast uses a simple **hub ↔ leaf** design:
   Central server that also mirrors its own local clipboard to the network. It can advertise itself via UDP broadcast for auto-discovery.
 - **Leaf**
   Connects to a hub and syncs clipboard text changes. Two ways to start:
-  - **Direct:** `leaf://IP:PORT` connects to the given hub.
-  - **Discovery:** `leaf` listens for UDP beacons and auto-joins the first valid hub it hears.
+  - **Direct:** `boardcast leaf://IP:PORT` connects to the given hub.
+  - **Discovery:** `boardcast leaf` listens for UDP beacons and auto-joins the first valid hub it hears.
 
 The implementation is single-threaded, uses BSD sockets, and is one C source file.
 
